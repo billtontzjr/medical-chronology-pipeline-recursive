@@ -4,7 +4,7 @@ import os
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Callable
 import logging
 
 from .tools.dropbox_tool import DropboxTool
@@ -61,13 +61,15 @@ class MedicalChronologyPipeline:
 
         return dirs
 
-    async def run_pipeline(self, dropbox_link: str, patient_id: Optional[str] = None) -> Dict:
+    async def run_pipeline(self, dropbox_link: str, patient_id: Optional[str] = None,
+                          progress_callback: Optional[Callable[[str], None]] = None) -> Dict:
         """
         Run the complete medical chronology pipeline.
 
         Args:
             dropbox_link: Dropbox shared link to medical records
             patient_id: Optional patient identifier
+            progress_callback: Optional callback for real-time progress updates
 
         Returns:
             Dictionary with pipeline results
@@ -105,11 +107,15 @@ class MedicalChronologyPipeline:
 
             # Phase 2: OCR Processing
             self.logger.info("Phase 2: Extracting text with OCR...")
+            if progress_callback:
+                progress_callback(f"🔍 Starting OCR for {len(downloaded_files)} files...")
+
             pdf_paths = [item['local_path'] for item in downloaded_files]
 
             ocr_results = await self.ocr_client.batch_extract(
                 pdf_paths,
-                max_concurrent=3
+                max_concurrent=1,  # Memory-safe: process one file at a time
+                progress_callback=progress_callback
             )
 
             # Save extracted text
@@ -135,6 +141,8 @@ class MedicalChronologyPipeline:
 
             # Phase 3: Agent Processing
             self.logger.info("Phase 3: Generating medical chronology with Claude Agent...")
+            if progress_callback:
+                progress_callback(f"🤖 Starting Claude Agent to generate chronology...")
 
             # Build the directive prompt for the agent
             file_list = "\n".join([f"  - {Path(f).name}" for f in extracted_files])
@@ -197,6 +205,10 @@ Begin by scanning the input directory and reading all files."""
                             # Log first 100 chars of each message
                             preview = block.text[:100].replace('\n', ' ')
                             self.logger.info(f"Agent: {preview}...")
+
+                            # Send progress update to UI
+                            if progress_callback:
+                                progress_callback(f"🤖 Agent: {preview}...")
 
             self.logger.info("Agent processing complete")
             result = {'messages': messages}

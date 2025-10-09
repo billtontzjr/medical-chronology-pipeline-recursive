@@ -127,37 +127,23 @@ if generate_btn:
         # Status updates
         with status_container:
             status = st.status("🔄 Running pipeline...", expanded=True)
+            progress_placeholder = st.empty()
 
         try:
-            # Phase 1: Download
-            with status:
-                st.write("📥 Phase 1: Downloading files from Dropbox...")
-                phase1_progress = st.progress(0)
+            # Real-time progress callback
+            def update_progress(message: str):
+                with progress_placeholder:
+                    st.info(message)
 
-            # Run pipeline
+            # Run pipeline with progress updates
             async def run():
-                return await pipeline.run_pipeline(dropbox_link, patient_id)
+                return await pipeline.run_pipeline(dropbox_link, patient_id, progress_callback=update_progress)
 
             result = asyncio.run(run())
 
             if result['success']:
-                with status:
-                    phase1_progress.progress(25)
-                    st.write(f"✅ Downloaded {result['files_processed']} PDF files")
-
-                    st.write("🔍 Phase 2: OCR text extraction...")
-                    phase2_progress = st.progress(50)
-                    st.write(f"✅ Extracted text from {result['files_processed']} files")
-
-                    st.write("🤖 Phase 3: Generating chronology with Claude Agent...")
-                    phase3_progress = st.progress(75)
-                    st.write("✅ Chronology generated")
-
-                    st.write("📝 Phase 4: Validating outputs...")
-                    phase4_progress = st.progress(100)
-                    st.write("✅ Pipeline complete!")
-
                 status.update(label="✅ Pipeline completed successfully!", state="complete")
+                progress_placeholder.empty()  # Clear progress messages
 
                 # Show results
                 results_header.header("📄 Generated Files")
