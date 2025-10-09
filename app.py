@@ -78,6 +78,13 @@ with col1:
         help="Paste a Dropbox shared link OR enter a direct path (e.g., /2025 expert files/patient name)"
     )
 
+    # Open Dropbox button
+    st.link_button(
+        "📂 Open Dropbox",
+        "https://www.dropbox.com/home",
+        help="Opens your Dropbox in a new tab to browse and copy folder paths"
+    )
+
     # Patient ID input
     patient_id = st.text_input(
         "Patient ID",
