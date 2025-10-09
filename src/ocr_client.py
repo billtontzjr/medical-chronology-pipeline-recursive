@@ -127,8 +127,19 @@ class OCRClient:
                 from pdf2image.pdf2image import pdfinfo_from_path
                 info = pdfinfo_from_path(file_path)
                 total_pages = info.get('Pages', 0)
-            except:
-                total_pages = 0
+            except Exception as e:
+                # Fallback: convert first page to get count
+                try:
+                    test_images = convert_from_path(file_path, dpi=72, first_page=1, last_page=1)
+                    # Try to get all pages with low DPI just to count
+                    all_images = convert_from_path(file_path, dpi=72)
+                    total_pages = len(all_images)
+                    del all_images
+                    del test_images
+                    gc.collect()
+                except:
+                    # Last resort: assume 10 pages and try
+                    total_pages = 100  # Try up to 100 pages
 
             if progress_callback:
                 progress_callback(f"📄 Processing {file_name} ({total_pages} pages)")
@@ -152,7 +163,8 @@ class OCRClient:
                     )
 
                     if not images:
-                        continue
+                        # No more pages, stop processing
+                        break
 
                     image = images[0]
 
@@ -173,8 +185,15 @@ class OCRClient:
                     gc.collect()
 
                 except Exception as e:
+                    error_msg = str(e).lower()
+                    # Stop if we've gone past the last page
+                    if 'page' in error_msg and ('out of range' in error_msg or 'invalid' in error_msg or 'exceed' in error_msg):
+                        if progress_callback:
+                            progress_callback(f"✅ Reached end of document at page {page_num-1}")
+                        break
+                    # For other errors, log and continue
                     if progress_callback:
-                        progress_callback(f"⚠️ Page {page_num} failed: {str(e)}")
+                        progress_callback(f"⚠️ Page {page_num} failed: {str(e)[:100]}")
                     continue
 
             # Combine all pages
