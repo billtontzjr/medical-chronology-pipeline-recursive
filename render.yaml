@@ -1,14 +1,9 @@
 services:
   - type: web
     name: medical-chronology-pipeline
-    env: python
-    buildCommand: |
-      apt-get update && apt-get install -y poppler-utils
-      pip install -r requirements.txt
-    startCommand: streamlit run app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true
+    env: docker
+    dockerfilePath: ./Dockerfile
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.0
       - key: DROPBOX_APP_KEY
         sync: false
       - key: DROPBOX_APP_SECRET
@@ -21,5 +16,5 @@ services:
         sync: false
     disk:
       name: medical-data
-      mountPath: /opt/render/project/src/data
+      mountPath: /app/data
       sizeGB: 10
