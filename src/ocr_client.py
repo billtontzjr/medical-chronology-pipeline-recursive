@@ -2,8 +2,9 @@
 
 import base64
 import io
+import gc
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Callable, Optional
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import httpx
@@ -104,13 +105,16 @@ class OCRClient:
                 'text': ''
             }
 
-    def extract_text(self, file_path: str, timeout: int = 300) -> Dict:
+    def extract_text(self, file_path: str, timeout: int = 300,
+                    progress_callback: Optional[Callable[[str], None]] = None) -> Dict:
         """
         Extract text from a PDF file using Google Vision OCR.
+        Memory-optimized: processes one page at a time.
 
         Args:
             file_path: Path to the PDF file
             timeout: Timeout in seconds (default 5 minutes)
+            progress_callback: Optional callback for progress updates
 
         Returns:
             Dictionary with extraction results
@@ -118,67 +122,85 @@ class OCRClient:
         try:
             file_name = Path(file_path).name
 
-            # Convert PDF to images (one image per page)
+            # Get page count first (without loading all pages)
             try:
-                images = convert_from_path(
-                    file_path,
-                    dpi=200,  # Good balance between quality and size
-                    fmt='png'
-                )
-            except Exception as e:
-                return {
-                    'success': False,
-                    'file_name': file_name,
-                    'error': f"Failed to convert PDF to images: {str(e)}",
-                    'text': '',
-                    'confidence': 0.0
-                }
+                from pdf2image.pdf2image import pdfinfo_from_path
+                info = pdfinfo_from_path(file_path)
+                total_pages = info.get('Pages', 0)
+            except:
+                total_pages = 0
 
-            if not images:
-                return {
-                    'success': False,
-                    'file_name': file_name,
-                    'error': "No pages found in PDF",
-                    'text': '',
-                    'confidence': 0.0
-                }
+            if progress_callback:
+                progress_callback(f"📄 Processing {file_name} ({total_pages} pages)")
 
-            # Process each page
+            # Process each page individually (memory-efficient)
             all_text = []
             successful_pages = 0
 
-            for page_num, image in enumerate(images, 1):
-                # Convert image to base64
-                image_base64 = self._image_to_base64(image)
+            for page_num in range(1, total_pages + 1):
+                if progress_callback:
+                    progress_callback(f"📄 {file_name}: Page {page_num}/{total_pages}")
 
-                # Extract text from this page
-                result = self._extract_text_from_image(image_base64, timeout=60)
+                try:
+                    # Convert only ONE page at a time
+                    images = convert_from_path(
+                        file_path,
+                        dpi=200,
+                        first_page=page_num,
+                        last_page=page_num,
+                        fmt='png'
+                    )
 
-                if result['success'] and result['text'].strip():
-                    all_text.append(result['text'])
-                    successful_pages += 1
+                    if not images:
+                        continue
+
+                    image = images[0]
+
+                    # Convert image to base64
+                    image_base64 = self._image_to_base64(image)
+
+                    # Extract text from this page
+                    result = self._extract_text_from_image(image_base64, timeout=60)
+
+                    if result['success'] and result['text'].strip():
+                        all_text.append(result['text'])
+                        successful_pages += 1
+
+                    # Clear memory immediately after processing this page
+                    del images
+                    del image
+                    del image_base64
+                    gc.collect()
+
+                except Exception as e:
+                    if progress_callback:
+                        progress_callback(f"⚠️ Page {page_num} failed: {str(e)}")
+                    continue
 
             # Combine all pages
             full_text = "\n\n".join(all_text)
 
             # Calculate confidence based on success rate
-            confidence = successful_pages / len(images) if images else 0.0
+            confidence = successful_pages / total_pages if total_pages > 0 else 0.0
 
             if not full_text.strip():
                 return {
                     'success': False,
                     'file_name': file_name,
-                    'error': f"No text extracted from {len(images)} pages",
+                    'error': f"No text extracted from {total_pages} pages",
                     'text': '',
                     'confidence': 0.0
                 }
+
+            if progress_callback:
+                progress_callback(f"✅ {file_name}: Extracted {successful_pages}/{total_pages} pages")
 
             return {
                 'success': True,
                 'file_name': file_name,
                 'text': full_text,
                 'confidence': confidence,
-                'page_count': len(images)
+                'page_count': total_pages
             }
 
         except Exception as e:
@@ -191,13 +213,16 @@ class OCRClient:
             }
 
     async def batch_extract(self, file_paths: List[str],
-                           max_concurrent: int = 3) -> List[Dict]:
+                           max_concurrent: int = 1,
+                           progress_callback: Optional[Callable[[str], None]] = None) -> List[Dict]:
         """
         Extract text from multiple PDF files with concurrency control.
+        Memory-optimized: processes ONE file at a time by default.
 
         Args:
             file_paths: List of paths to PDF files
-            max_concurrent: Maximum number of concurrent OCR requests
+            max_concurrent: Maximum concurrent files (default 1 for memory safety)
+            progress_callback: Optional callback for progress updates
 
         Returns:
             List of extraction results
@@ -205,20 +230,29 @@ class OCRClient:
         results = []
         semaphore = asyncio.Semaphore(max_concurrent)
 
-        async def process_file(file_path: str) -> Dict:
+        async def process_file(file_path: str, file_num: int, total_files: int) -> Dict:
             async with semaphore:
+                if progress_callback:
+                    progress_callback(f"📁 Processing file {file_num}/{total_files}: {Path(file_path).name}")
+
                 # Run OCR in thread pool to avoid blocking
                 loop = asyncio.get_event_loop()
                 with ThreadPoolExecutor() as pool:
                     result = await loop.run_in_executor(
                         pool,
                         self.extract_text,
-                        file_path
+                        file_path,
+                        300,  # timeout
+                        progress_callback  # pass callback through
                     )
+
+                # Force garbage collection after each file
+                gc.collect()
                 return result
 
         # Process all files
-        tasks = [process_file(fp) for fp in file_paths]
+        total_files = len(file_paths)
+        tasks = [process_file(fp, i+1, total_files) for i, fp in enumerate(file_paths)]
         results = await asyncio.gather(*tasks)
 
         return results
