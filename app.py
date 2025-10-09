@@ -57,12 +57,13 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 📖 How it works")
     st.markdown("""
-    1. Enter Dropbox link or path:
-       - **Shared link**: Copy link from Dropbox
-       - **Direct path**: `/folder/patient` format
-    2. Provide patient identifier
-    3. Click 'Generate Chronology'
-    4. Download results
+    1. Click "Open Dropbox" button
+    2. Navigate to patient folder in Dropbox
+    3. Copy URL from browser address bar
+    4. Paste URL into input field
+    5. Enter patient identifier
+    6. Click 'Generate Chronology'
+    7. Download results
     """)
 
 # Main content
@@ -73,16 +74,16 @@ with col1:
 
     # Dropbox link input
     dropbox_link = st.text_input(
-        "Dropbox Shared Link or Path",
-        placeholder="https://www.dropbox.com/scl/fo/... OR /My Folder/Patient Name",
-        help="Paste a Dropbox shared link OR enter a direct path (e.g., /2025 expert files/patient name)"
+        "Dropbox Folder URL or Path",
+        placeholder="Paste URL from browser address bar or use /folder/path format",
+        help="Click 'Open Dropbox' below, navigate to folder, then copy the URL from your browser's address bar"
     )
 
     # Open Dropbox button
     st.link_button(
         "📂 Open Dropbox",
         "https://www.dropbox.com/home",
-        help="Opens your Dropbox in a new tab to browse and copy folder paths"
+        help="Click to open Dropbox, navigate to the patient folder, then copy the URL from your browser"
     )
 
     # Patient ID input

@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 from typing import List, Dict, Optional
+from urllib.parse import unquote, urlparse
 import dropbox
 from dropbox.files import FileMetadata, FolderMetadata
 from dropbox.sharing import SharedLinkMetadata
@@ -38,6 +39,46 @@ class DropboxTool:
             if not access_token:
                 raise ValueError("access_token required when use_oauth=False")
             self.dbx = dropbox.Dropbox(access_token)
+
+    def _parse_dropbox_url(self, url_or_path: str) -> str:
+        """
+        Parse a Dropbox URL and convert it to a path.
+
+        Supports:
+        - Direct paths: /folder/subfolder
+        - Home URLs: https://www.dropbox.com/home/Bill%20tontz/folder
+        - Shared links: https://www.dropbox.com/scl/fo/...
+
+        Args:
+            url_or_path: URL or path string
+
+        Returns:
+            Dropbox path starting with /
+        """
+        # Already a path
+        if url_or_path.startswith('/'):
+            return url_or_path
+
+        # Parse URL
+        parsed = urlparse(url_or_path)
+
+        # Handle home URLs: https://www.dropbox.com/home/username/path
+        if '/home/' in parsed.path:
+            # Extract path after /home/username/
+            parts = parsed.path.split('/home/')
+            if len(parts) > 1:
+                # Get everything after the username
+                remaining = parts[1]
+                # Find the next slash (after username)
+                slash_idx = remaining.find('/')
+                if slash_idx != -1:
+                    path = remaining[slash_idx:]
+                    # URL decode (convert %20 to spaces, etc.)
+                    return unquote(path)
+
+        # For shared links or other URLs, return as-is
+        # (will be handled by the shared link API)
+        return url_or_path
 
     def list_files(self, folder_path: str = "") -> List[Dict]:
         """
@@ -191,15 +232,22 @@ class DropboxTool:
 
         Args:
             shared_link: Dropbox shared link URL OR direct path (e.g., "/My Folder/Patient")
+                        Also supports home URLs like: https://www.dropbox.com/home/username/path
             local_dir: Local directory to save files
             extensions: Optional list of file extensions to filter
 
         Returns:
             Dictionary with download results
         """
+        # Parse URL and convert to path if needed
+        parsed_path = self._parse_dropbox_url(shared_link)
+
         # Check if this is a direct path (starts with /) instead of a URL
-        if shared_link.startswith('/'):
-            return self.download_folder(shared_link, local_dir, extensions)
+        if parsed_path.startswith('/'):
+            return self.download_folder(parsed_path, local_dir, extensions)
+
+        # Use the parsed result for shared links
+        shared_link = parsed_path
         if extensions is None:
             extensions = ['.pdf']
 
