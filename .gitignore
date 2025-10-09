@@ -16,9 +16,12 @@ ENV/
 # Data files (sensitive medical records)
 data/
 *.pdf
-*.txt
-*.json
-*.md
+
+# Keep deployment files but ignore data files
+!requirements.txt
+!DEPLOYMENT.md
+!SETUP_FOR_CLARE.md
+!README.md
 
 # IDE
 .vscode/
