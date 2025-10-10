@@ -9,6 +9,7 @@ import logging
 
 try:
     from anthropic import Anthropic
+    import httpx
 except ImportError:
     raise ImportError("anthropic package not installed. Run: pip install anthropic")
 
@@ -23,11 +24,27 @@ class ChronologyAgent:
         Args:
             api_key: Anthropic API key
         """
-        # Configure with longer timeout for large documents
+        # Configure HTTP client with aggressive retry and timeout settings
+        http_client = httpx.Client(
+            timeout=httpx.Timeout(
+                connect=60.0,    # 60s to establish connection
+                read=300.0,      # 5 minutes to read response
+                write=60.0,      # 60s to send request
+                pool=10.0        # 10s to get connection from pool
+            ),
+            limits=httpx.Limits(
+                max_connections=10,
+                max_keepalive_connections=5
+            ),
+            follow_redirects=True,
+            verify=True  # Verify SSL certificates
+        )
+
+        # Configure Anthropic client with custom HTTP client
         self.client = Anthropic(
             api_key=api_key,
-            timeout=300.0,  # 5 minute default timeout
-            max_retries=3
+            http_client=http_client,
+            max_retries=5  # More retries for network issues
         )
         self.logger = logging.getLogger(__name__)
 
@@ -134,22 +151,32 @@ Then write the gaps analysis."""
             # Call Claude with timeout handling
             self.logger.info("Calling Claude API...")
             self.logger.info(f"Prompt length: {len(prompt)} characters")
+            self.logger.info(f"Using model: claude-sonnet-4-5-20250929")
 
             try:
+                self.logger.info("Initiating API request...")
                 response = self.client.messages.create(
                     model="claude-sonnet-4-5-20250929",  # Claude Sonnet 4.5 with enhanced memory
                     max_tokens=16000,
                     temperature=0,
-                    timeout=300.0,  # 5 minute timeout
                     messages=[{
                         "role": "user",
                         "content": prompt
                     }]
                 )
+                self.logger.info("API request successful!")
             except Exception as e:
                 import traceback
+                import sys
+
                 self.logger.error(f"API call failed: {type(e).__name__}: {e}")
+                self.logger.error(f"Error type: {type(e).__module__}.{type(e).__name__}")
+                self.logger.error(f"Full error details: {repr(e)}")
                 self.logger.error(f"Full traceback: {traceback.format_exc()}")
+
+                # Log additional network diagnostic info
+                if hasattr(e, '__cause__'):
+                    self.logger.error(f"Caused by: {type(e.__cause__).__name__}: {e.__cause__}")
 
                 # Check if it's a connection error - try once more with simpler request
                 if "connection" in str(e).lower() or "timeout" in str(e).lower():
@@ -165,16 +192,17 @@ Create a chronological summary following standard medical chronology format.
 Output the chronology in markdown format."""
 
                     try:
+                        self.logger.info("Retrying with simplified prompt...")
                         response = self.client.messages.create(
                             model="claude-sonnet-4-5-20250929",
                             max_tokens=8000,
                             temperature=0,
-                            timeout=300.0,
                             messages=[{
                                 "role": "user",
                                 "content": simplified_prompt
                             }]
                         )
+                        self.logger.info("Retry successful!")
                     except Exception as retry_error:
                         self.logger.error(f"Retry also failed: {retry_error}")
                         raise Exception(f"API connection failed after retry: {str(e)}")
