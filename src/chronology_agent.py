@@ -127,30 +127,43 @@ class ChronologyAgent:
                 for doc in documents
             ])
 
-            prompt = f"""You are generating a medical chronology from OCR-extracted medical records.
+            # Use condensed rules to stay under token limit
+            condensed_rules = """Create a medical chronology following these key rules:
 
-**RULES AND FORMATTING:**
-{rules}
+1. **Format**: [MM/DD/YYYY]. [Facility]. [Provider Name], [Credentials]. [Visit Type].
+   Then one paragraph with: Chief Complaint: ... History: ... Exam: ... Assessment: ... Plan: ...
 
-**EXTRACTED DOCUMENTS ({len(documents)} files):**
+2. **Imaging Reports**: ONLY include the Impression section, nothing else.
+
+3. **Therapy Sessions**: Consolidate all follow-up visits into one entry with all dates listed.
+
+4. **Tone**: Direct, factual, clinical. Avoid narrative phrases. Use in-paragraph headings.
+
+5. **Focus**: Prioritize orthopedic/spine/neurological findings. Exclude routine vitals.
+
+6. **No Lists**: Convert all bullet points to complete sentences in paragraphs.
+
+7. **Header**:
+   MEDICAL RECORDS SUMMARY
+   [PATIENT NAME]
+   Date of Birth: [Date]
+   Date of Injury: [Date]"""
+
+            prompt = f"""Generate a medical chronology from these OCR-extracted documents.
+
+{condensed_rules}
+
+**DOCUMENTS ({len(documents)} files):**
 {documents_text}
 
-**YOUR TASK:**
-1. Review all the documents above
-2. Create a comprehensive medical chronology following ALL the rules specified
-3. Generate the chronology in markdown format
-4. Also create a JSON version with structured data
-5. Write an executive summary
-6. Note any gaps, OCR errors, or missing information
-
-**RESPOND WITH:**
-First, write the complete markdown chronology.
-Then write "---JSON---" on its own line.
-Then write the complete JSON version.
-Then write "---SUMMARY---" on its own line.
-Then write the executive summary.
-Then write "---GAPS---" on its own line.
-Then write the gaps analysis."""
+**OUTPUT FORMAT:**
+Write the chronology in markdown.
+Then "---JSON---"
+Then JSON version.
+Then "---SUMMARY---"
+Then executive summary.
+Then "---GAPS---"
+Then gaps/OCR issues."""
 
             # Call Claude with timeout handling
             self.logger.info("Calling Claude API...")
