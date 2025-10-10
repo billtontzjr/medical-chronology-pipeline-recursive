@@ -9,10 +9,8 @@ import logging
 
 from .tools.dropbox_tool import DropboxTool
 from .ocr_client import OCRClient
+from .chronology_agent import ChronologyAgent
 from .hooks.formatting_guard import get_formatting_hooks
-
-# Note: Claude Agent SDK import will be done dynamically
-# from claude_agent_sdk import ClaudeAgent
 
 
 class MedicalChronologyPipeline:
@@ -30,7 +28,7 @@ class MedicalChronologyPipeline:
         # Initialize Dropbox with OAuth (or fallback to token)
         self.dropbox_tool = DropboxTool(access_token=dropbox_token, use_oauth=True)
         self.ocr_client = OCRClient(google_api_key)
-        self.anthropic_api_key = anthropic_api_key
+        self.chronology_agent = ChronologyAgent(anthropic_api_key)
 
         # Set up logging
         logging.basicConfig(
@@ -140,78 +138,20 @@ class MedicalChronologyPipeline:
                 raise Exception("No text could be extracted from PDFs")
 
             # Phase 3: Agent Processing
-            self.logger.info("Phase 3: Generating medical chronology with Claude Agent...")
+            self.logger.info("Phase 3: Generating medical chronology with Claude...")
             if progress_callback:
-                progress_callback(f"🤖 Starting Claude Agent to generate chronology...")
+                progress_callback(f"🤖 Starting chronology generation...")
 
-            # Build the directive prompt for the agent
-            file_list = "\n".join([f"  - {Path(f).name}" for f in extracted_files])
-            directive = f"""You are tasked with creating a medical chronology from OCR-extracted medical records.
-
-**Input Details:**
-- Number of files: {len(extracted_files)}
-- Input directory: {dirs['extracted']}
-- Output directory: {dirs['output']}
-
-**Files to process:**
-{file_list}
-
-**Your Task:**
-Follow ALL rules in .claude/CLAUDE.md to generate:
-1. chronology.md - The formatted medical chronology
-2. chronology.json - Structured data version
-3. summary.md - Executive summary
-4. gaps.md - Document gaps and OCR issues
-
-**Important:**
-- Read each .txt file in the input directory
-- Extract information following the strict formatting rules
-- Check for OCR errors and note them in gaps.md
-- Use the quality-checker subagent for self-correction
-- Write all outputs to: {dirs['output']}
-
-Begin by scanning the input directory and reading all files."""
-
-            # Import Claude Agent SDK
-            try:
-                from claude_agent_sdk import query, ClaudeAgentOptions
-            except ImportError:
-                raise Exception(
-                    "Claude Agent SDK not installed. "
-                    "Run: pip install claude-agent-sdk"
-                )
-
-            # Set API key in environment (required by SDK)
-            os.environ['ANTHROPIC_API_KEY'] = self.anthropic_api_key
-
-            # Create options for the agent
-            options = ClaudeAgentOptions(
-                system_prompt="You are a medical chronology expert. Follow the rules in .claude/CLAUDE.md precisely.",
-                cwd=base_dir,  # Run in project root to access both input and output dirs
-                permission_mode='acceptEdits'  # Auto-accept file edits
+            # Generate chronology using direct API
+            result = self.chronology_agent.generate_chronology(
+                input_dir=dirs['extracted'],
+                output_dir=dirs['output'],
+                base_dir=base_dir,
+                progress_callback=progress_callback
             )
 
-            # Run the agent
-            self.logger.info("Agent is processing medical records...")
-
-            # Execute query and collect all messages
-            messages = []
-            async for message in query(prompt=directive, options=options):
-                messages.append(message)
-                # Log progress
-                if hasattr(message, 'content'):
-                    for block in message.content:
-                        if hasattr(block, 'text') and block.text:
-                            # Log first 100 chars of each message
-                            preview = block.text[:100].replace('\n', ' ')
-                            self.logger.info(f"Agent: {preview}...")
-
-                            # Send progress update to UI
-                            if progress_callback:
-                                progress_callback(f"🤖 Agent: {preview}...")
-
-            self.logger.info("Agent processing complete")
-            result = {'messages': messages}
+            if not result['success']:
+                raise Exception(f"Chronology generation failed: {result.get('error')}")
 
             # Phase 4: Validate outputs
             self.logger.info("Phase 4: Validating outputs...")
