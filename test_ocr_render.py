@@ -22,10 +22,25 @@ def test_ocr():
 
     print(f"✅ API key found: {api_key[:10]}...{api_key[-4:]}")
 
-    # Find a test PDF
-    test_pdfs = list(Path('data/input').rglob('*.pdf'))
+    # Find a test PDF - check both relative and absolute paths
+    search_paths = [
+        Path('data/input'),  # Relative (for local testing)
+        Path('/app/data/input'),  # Absolute (for Render)
+    ]
+
+    test_pdfs = []
+    for search_path in search_paths:
+        if search_path.exists():
+            print(f"📁 Searching in: {search_path}")
+            test_pdfs = list(search_path.rglob('*.pdf'))
+            if test_pdfs:
+                break
+
     if not test_pdfs:
-        print("❌ No PDFs found in data/input")
+        print("❌ No PDFs found")
+        print("   Tried:")
+        for p in search_paths:
+            print(f"   - {p} (exists: {p.exists()})")
         return
 
     test_file = test_pdfs[0]
