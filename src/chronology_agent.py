@@ -249,7 +249,7 @@ Begin your analysis:"""
         # Condensed rules for batch processing
         rules = """Create medical chronology entries following these rules:
 
-**Format**: [MM/DD/YYYY]. [Facility]. [Provider Name], [Credentials]. [Visit Type].
+**Format**: MM/DD/YYYY. Facility. Provider Name, Credentials. Visit Type.
 Then one paragraph: Chief Complaint: ... History: ... Exam: ... Assessment: ... Plan: ...
 
 **Imaging**: ONLY Impression section
