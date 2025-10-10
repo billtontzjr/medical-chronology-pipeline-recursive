@@ -24,6 +24,10 @@ class ChronologyAgent:
         Args:
             api_key: Anthropic API key
         """
+        # Sanitize API key - remove any whitespace/newlines that break HTTP headers
+        if api_key:
+            api_key = api_key.strip()
+
         # Configure HTTP client with aggressive retry and timeout settings
         http_client = httpx.Client(
             timeout=httpx.Timeout(

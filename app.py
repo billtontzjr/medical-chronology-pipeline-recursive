@@ -26,12 +26,12 @@ st.markdown("---")
 with st.sidebar:
     st.header("⚙️ Configuration")
 
-    # Check API keys
-    dropbox_app_key = os.getenv('DROPBOX_APP_KEY')
-    dropbox_app_secret = os.getenv('DROPBOX_APP_SECRET')
-    dropbox_refresh_token = os.getenv('DROPBOX_REFRESH_TOKEN')
-    google_api_key = os.getenv('GOOGLE_CLOUD_API_KEY')
-    anthropic_api_key = os.getenv('ANTHROPIC_API_KEY')
+    # Check API keys and sanitize (remove whitespace that breaks HTTP headers)
+    dropbox_app_key = os.getenv('DROPBOX_APP_KEY', '').strip() or None
+    dropbox_app_secret = os.getenv('DROPBOX_APP_SECRET', '').strip() or None
+    dropbox_refresh_token = os.getenv('DROPBOX_REFRESH_TOKEN', '').strip() or None
+    google_api_key = os.getenv('GOOGLE_CLOUD_API_KEY', '').strip() or None
+    anthropic_api_key = os.getenv('ANTHROPIC_API_KEY', '').strip() or None
 
     # Check if Dropbox OAuth is configured
     if dropbox_app_key and dropbox_app_secret and dropbox_refresh_token:
