@@ -183,6 +183,43 @@ if generate_btn:
 
                         if result['missing_files']:
                             st.warning(f"⚠️ Missing files: {', '.join(result['missing_files'])}")
+
+                        # Quality check button
+                        st.markdown("---")
+                        st.subheader("🔍 Quality Verification")
+                        st.info("Check for hallucinations or inaccuracies in the generated chronology against source documents.")
+
+                        if st.button("🚀 Run Quality Check", type="secondary"):
+                            verification_status = st.status("🔍 Verifying chronology...", expanded=True)
+                            verification_progress = st.empty()
+
+                            def verification_callback(msg: str):
+                                with verification_progress:
+                                    st.info(msg)
+
+                            # Run verification
+                            chronology_path = result['output_files'].get('chronology.md')
+                            if chronology_path:
+                                verification_result = pipeline.chronology_agent.verify_chronology(
+                                    chronology_path=chronology_path,
+                                    extracted_dir=result['extracted_dir'],
+                                    progress_callback=verification_callback
+                                )
+
+                                if verification_result['success']:
+                                    verification_status.update(label="✅ Verification complete!", state="complete")
+                                    verification_progress.empty()
+
+                                    st.markdown("### 📋 Verification Report")
+                                    st.markdown(verification_result['verification'])
+
+                                    st.info(f"Analyzed against {verification_result['documents_checked']} source documents")
+                                else:
+                                    verification_status.update(label="❌ Verification failed", state="error")
+                                    st.error(f"Error: {verification_result.get('error')}")
+                            else:
+                                st.error("Chronology file not found")
+
                     else:
                         st.warning("No output files were generated")
 

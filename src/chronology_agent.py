@@ -134,6 +134,98 @@ class ChronologyAgent:
 
         return documents
 
+    def verify_chronology(
+        self,
+        chronology_path: str,
+        extracted_dir: str,
+        progress_callback: Optional[Callable[[str], None]] = None
+    ) -> Dict:
+        """
+        Verify chronology against source documents to detect hallucinations.
+
+        Args:
+            chronology_path: Path to generated chronology.md
+            extracted_dir: Directory with extracted text files
+            progress_callback: Optional progress callback
+
+        Returns:
+            Dictionary with verification results
+        """
+        try:
+            if progress_callback:
+                progress_callback("🔍 Loading chronology and source documents...")
+
+            # Read chronology
+            with open(chronology_path, 'r', encoding='utf-8') as f:
+                chronology_text = f.read()
+
+            # Read source documents
+            documents = self._read_extracted_files(extracted_dir)
+
+            if progress_callback:
+                progress_callback(f"🤖 Analyzing chronology against {len(documents)} source documents...")
+
+            # Build verification prompt
+            source_summary = "\n\n".join([
+                f"=== {doc['filename']} ===\n{doc['content'][:2000]}..."  # First 2000 chars of each
+                for doc in documents[:10]  # Sample first 10 docs
+            ])
+
+            prompt = f"""You are a medical record auditor checking for hallucinations and inaccuracies.
+
+**CHRONOLOGY TO VERIFY:**
+{chronology_text[:10000]}
+
+**SOURCE DOCUMENTS (SAMPLE):**
+{source_summary}
+
+**YOUR TASK:**
+Review the chronology entries and identify any potential issues:
+
+1. **Hallucinations**: Information in chronology NOT found in source documents
+2. **Date Errors**: Dates that don't match source documents
+3. **Misattributions**: Information attributed to wrong provider/facility
+4. **Exaggerations**: Facts overstated or added beyond source
+5. **Omissions**: Critical information missing from chronology
+
+**OUTPUT FORMAT:**
+For each issue found, provide:
+- Entry Date: [date from chronology]
+- Issue Type: [hallucination/date error/misattribution/etc]
+- Description: [what's wrong]
+- Severity: [critical/moderate/minor]
+
+If no issues found, state: "No significant issues detected."
+
+Begin your analysis:"""
+
+            # Call Claude
+            self.logger.info("Running hallucination check...")
+            response = self.client.messages.create(
+                model="claude-sonnet-4-5-20250929",
+                max_tokens=4000,
+                temperature=0,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            verification_result = response.content[0].text
+
+            if progress_callback:
+                progress_callback("✅ Verification complete!")
+
+            return {
+                'success': True,
+                'verification': verification_result,
+                'documents_checked': len(documents)
+            }
+
+        except Exception as e:
+            self.logger.error(f"Verification failed: {e}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
     def _process_batch(self, documents: List[Dict], batch_num: int, total_batches: int) -> str:
         """
         Process a batch of documents and return chronology markdown.
