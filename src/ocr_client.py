@@ -26,9 +26,38 @@ class OCRClient:
         self.api_url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
 
     def _image_to_base64(self, image: Image.Image) -> str:
-        """Convert PIL Image to base64 string."""
+        """
+        Convert PIL Image to base64 string with size optimization.
+
+        Uses JPEG format with quality control to stay under Google Vision's 20MB limit.
+        """
+        # Convert RGBA to RGB if needed (JPEG doesn't support transparency)
+        if image.mode in ('RGBA', 'LA', 'P'):
+            rgb_image = Image.new('RGB', image.size, (255, 255, 255))
+            if image.mode == 'P':
+                image = image.convert('RGBA')
+            rgb_image.paste(image, mask=image.split()[-1] if image.mode in ('RGBA', 'LA') else None)
+            image = rgb_image
+
+        # Try high quality first, reduce if too large
+        for quality in [95, 85, 75, 65]:
+            buffered = io.BytesIO()
+            image.save(buffered, format="JPEG", quality=quality, optimize=True)
+            image_bytes = buffered.getvalue()
+
+            # Google Vision API limit is 20MB for base64
+            if len(image_bytes) < 18_000_000:  # 18MB to be safe
+                return base64.b64encode(image_bytes).decode('utf-8')
+
+        # If still too large, resize the image
+        max_dimension = 4096  # Google Vision max dimension
+        if image.width > max_dimension or image.height > max_dimension:
+            ratio = min(max_dimension / image.width, max_dimension / image.height)
+            new_size = (int(image.width * ratio), int(image.height * ratio))
+            image = image.resize(new_size, Image.Resampling.LANCZOS)
+
         buffered = io.BytesIO()
-        image.save(buffered, format="PNG")
+        image.save(buffered, format="JPEG", quality=85, optimize=True)
         return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
     def _extract_text_from_image(self, image_base64: str, timeout: int = 60) -> Dict:
@@ -80,9 +109,13 @@ class OCRClient:
             response_data = data["responses"][0]
 
             if "error" in response_data:
+                error_msg = response_data["error"].get("message", "Unknown error")
+                # Add context for common errors
+                if "Bad image data" in error_msg or "image" in error_msg.lower():
+                    error_msg = f"Vision API error: {error_msg} (image may be too large or invalid format)"
                 return {
                     'success': False,
-                    'error': response_data["error"].get("message", "Unknown error"),
+                    'error': error_msg,
                     'text': ''
                 }
 
