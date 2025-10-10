@@ -198,66 +198,44 @@ Do NOT include header or JSON - just the chronology entries."""
             # Simply concatenate entries (they're already in chronological order per batch)
             combined_entries = "\n\n".join(batch_results)
 
-            # Now generate final chronology with header, summary, etc.
+            # Add header manually (don't send all entries back to API - too large)
             if progress_callback:
-                progress_callback(f"📋 Generating header and summary...")
+                progress_callback(f"📋 Adding header and generating summary...")
 
-            final_prompt = f"""You have chronology entries from {len(documents)} medical documents.
+            # Generic header
+            header = """MEDICAL RECORDS SUMMARY
+[Patient Name - See Records]
+Date of Birth: [See Records]
+Date of Injury: [See Records]
 
-Add a proper header and create summary/gaps analysis.
+"""
 
-**CHRONOLOGY ENTRIES:**
-{combined_entries}
+            chronology_md = header + combined_entries
 
-**YOUR TASK:**
-1. Add header:
-   MEDICAL RECORDS SUMMARY
-   [Extract patient name from records]
-   Date of Birth: [Extract from records]
-   Date of Injury: [Extract from records]
+            # Generate a simple summary based on document count only
+            summary_md = f"""Executive Summary
 
-2. Sort all entries chronologically
-3. Create executive summary
-4. Note any gaps or OCR issues
+This medical chronology was generated from {len(documents)} medical documents processed in {total_batches} batch(es).
 
-**OUTPUT FORMAT:**
-Write complete chronology with header.
-Then "---SUMMARY---"
-Then executive summary.
-Then "---GAPS---"
-Then gaps analysis."""
+The chronology contains entries organized chronologically documenting the patient's medical journey including:
+- Office visits and consultations
+- Imaging studies and diagnostic tests
+- Treatment plans and interventions
+- Follow-up care and therapy sessions
 
-            self.logger.info("Generating final chronology with header and summary...")
+Please review the complete chronology below for detailed medical information."""
 
-            try:
-                response = self.client.messages.create(
-                    model="claude-sonnet-4-5-20250929",
-                    max_tokens=16000,
-                    temperature=0,
-                    messages=[{"role": "user", "content": final_prompt}]
-                )
-                self.logger.info("Final chronology generated successfully!")
-            except Exception as e:
-                import traceback
-                self.logger.error(f"Final generation failed: {type(e).__name__}: {e}")
-                self.logger.error(f"Full traceback: {traceback.format_exc()}")
-                raise
+            gaps_md = f"""Document Analysis
 
-            # Parse response
-            full_response = response.content[0].text
+**Processing Summary:**
+- Total Documents Processed: {len(documents)}
+- Processing Method: {'Single batch' if total_batches == 1 else f'Multiple batches ({total_batches} batches)'}
+- OCR Quality: Review individual entries for any OCR artifacts or unclear text
 
-            # Split into sections
-            parts = full_response.split('---SUMMARY---')
-            chronology_md = parts[0].strip()
-
-            if len(parts) > 1:
-                remaining = parts[1]
-                summary_parts = remaining.split('---GAPS---')
-                summary_md = summary_parts[0].strip()
-                gaps_md = summary_parts[1].strip() if len(summary_parts) > 1 else ""
-            else:
-                summary_md = "Generated from batched processing."
-                gaps_md = "Review individual documents for OCR quality."
+**Recommendations:**
+- Verify all dates and provider information against source documents
+- Cross-reference critical findings with original records
+- Note any documents that may require manual review for OCR quality"""
 
             # Generate simple JSON structure
             chronology_json_text = f"""{{
