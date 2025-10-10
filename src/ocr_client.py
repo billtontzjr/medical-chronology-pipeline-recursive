@@ -45,19 +45,31 @@ class OCRClient:
             image.save(buffered, format="JPEG", quality=quality, optimize=True)
             image_bytes = buffered.getvalue()
 
-            # Google Vision API limit is 20MB for base64
-            if len(image_bytes) < 18_000_000:  # 18MB to be safe
+            # Google Vision API limit is 20MB for base64-encoded data
+            # Base64 encoding increases size by ~33%, so we check raw bytes against 15MB
+            # 15MB raw → ~20MB base64
+            if len(image_bytes) < 15_000_000:
                 return base64.b64encode(image_bytes).decode('utf-8')
 
-        # If still too large, resize the image
-        max_dimension = 4096  # Google Vision max dimension
-        if image.width > max_dimension or image.height > max_dimension:
-            ratio = min(max_dimension / image.width, max_dimension / image.height)
-            new_size = (int(image.width * ratio), int(image.height * ratio))
-            image = image.resize(new_size, Image.Resampling.LANCZOS)
+        # If still too large after quality reduction, aggressively resize
+        # Start with 50% size reduction, then try smaller if needed
+        for scale in [0.5, 0.4, 0.3, 0.25]:
+            new_size = (int(image.width * scale), int(image.height * scale))
+            resized = image.resize(new_size, Image.Resampling.LANCZOS)
 
+            buffered = io.BytesIO()
+            resized.save(buffered, format="JPEG", quality=85, optimize=True)
+            image_bytes = buffered.getvalue()
+
+            if len(image_bytes) < 15_000_000:
+                return base64.b64encode(image_bytes).decode('utf-8')
+
+        # Last resort: return heavily compressed version
+        # This should always work
         buffered = io.BytesIO()
-        image.save(buffered, format="JPEG", quality=85, optimize=True)
+        tiny_size = (int(image.width * 0.2), int(image.height * 0.2))
+        tiny = image.resize(tiny_size, Image.Resampling.LANCZOS)
+        tiny.save(buffered, format="JPEG", quality=60, optimize=True)
         return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
     def _extract_text_from_image(self, image_base64: str, timeout: int = 60) -> Dict:
@@ -187,9 +199,10 @@ class OCRClient:
 
                 try:
                     # Convert only ONE page at a time
+                    # Using 150 DPI balances quality and file size for OCR
                     images = convert_from_path(
                         file_path,
-                        dpi=200,
+                        dpi=150,
                         first_page=page_num,
                         last_page=page_num,
                         fmt='png'
