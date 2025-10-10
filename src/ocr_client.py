@@ -311,44 +311,31 @@ class OCRClient:
                            max_concurrent: int = 1,
                            progress_callback: Optional[Callable[[str], None]] = None) -> List[Dict]:
         """
-        Extract text from multiple PDF files with concurrency control.
-        Memory-optimized: processes ONE file at a time by default.
+        Extract text from multiple PDF files SYNCHRONOUSLY.
+        Simplified to avoid thread pool issues.
 
         Args:
             file_paths: List of paths to PDF files
-            max_concurrent: Maximum concurrent files (default 1 for memory safety)
+            max_concurrent: Ignored (kept for compatibility)
             progress_callback: Optional callback for progress updates
 
         Returns:
             List of extraction results
         """
         results = []
-        semaphore = asyncio.Semaphore(max_concurrent)
-
-        async def process_file(file_path: str, file_num: int, total_files: int) -> Dict:
-            async with semaphore:
-                if progress_callback:
-                    progress_callback(f"📁 Processing file {file_num}/{total_files}: {Path(file_path).name}")
-
-                # Run OCR in thread pool to avoid blocking
-                loop = asyncio.get_event_loop()
-                with ThreadPoolExecutor() as pool:
-                    result = await loop.run_in_executor(
-                        pool,
-                        self.extract_text,
-                        file_path,
-                        300,  # timeout
-                        progress_callback  # pass callback through
-                    )
-
-                # Force garbage collection after each file
-                gc.collect()
-                return result
-
-        # Process all files
         total_files = len(file_paths)
-        tasks = [process_file(fp, i+1, total_files) for i, fp in enumerate(file_paths)]
-        results = await asyncio.gather(*tasks)
+
+        # Process files one by one synchronously
+        for i, file_path in enumerate(file_paths):
+            if progress_callback:
+                progress_callback(f"📁 Processing file {i+1}/{total_files}: {Path(file_path).name}")
+
+            # Run OCR synchronously (no threads, no async complexity)
+            result = self.extract_text(file_path, timeout=300, progress_callback=progress_callback)
+            results.append(result)
+
+            # Force garbage collection after each file
+            gc.collect()
 
         return results
 
