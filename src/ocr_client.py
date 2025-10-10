@@ -34,6 +34,8 @@ class OCRClient:
         import logging
         logger = logging.getLogger(__name__)
 
+        print(f"🔍 IMAGE_TO_BASE64: {image.size[0]}x{image.size[1]} pixels, mode={image.mode}")
+        logger.warning(f"🔍 IMAGE_TO_BASE64: {image.size[0]}x{image.size[1]} pixels, mode={image.mode}")
         logger.info(f"Image to encode: {image.size[0]}x{image.size[1]} pixels, mode={image.mode}")
 
         # Convert RGBA to RGB if needed (JPEG doesn't support transparency)
