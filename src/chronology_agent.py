@@ -133,10 +133,11 @@ Then write the gaps analysis."""
 
             # Call Claude with timeout handling
             self.logger.info("Calling Claude API...")
+            self.logger.info(f"Prompt length: {len(prompt)} characters")
 
             try:
                 response = self.client.messages.create(
-                    model="claude-sonnet-4-20250514",
+                    model="claude-3-5-sonnet-20241022",  # Latest Claude 3.5 Sonnet
                     max_tokens=16000,
                     temperature=0,
                     timeout=300.0,  # 5 minute timeout
@@ -146,20 +147,37 @@ Then write the gaps analysis."""
                     }]
                 )
             except Exception as e:
-                self.logger.error(f"API call failed: {e}")
-                # Try with smaller max_tokens if it's a size issue
-                if "length" in str(e).lower() or "token" in str(e).lower():
-                    self.logger.info("Retrying with reduced token limit...")
-                    response = self.client.messages.create(
-                        model="claude-sonnet-4-20250514",
-                        max_tokens=8000,
-                        temperature=0,
-                        timeout=300.0,
-                        messages=[{
-                            "role": "user",
-                            "content": prompt
-                        }]
-                    )
+                import traceback
+                self.logger.error(f"API call failed: {type(e).__name__}: {e}")
+                self.logger.error(f"Full traceback: {traceback.format_exc()}")
+
+                # Check if it's a connection error - try once more with simpler request
+                if "connection" in str(e).lower() or "timeout" in str(e).lower():
+                    self.logger.info("Connection issue detected. Retrying with reduced prompt...")
+                    # Simplify prompt - send just the documents without full rules
+                    simplified_prompt = f"""Generate a medical chronology from these OCR-extracted documents.
+
+Create a chronological summary following standard medical chronology format.
+
+**DOCUMENTS:**
+{documents_text}
+
+Output the chronology in markdown format."""
+
+                    try:
+                        response = self.client.messages.create(
+                            model="claude-3-5-sonnet-20241022",
+                            max_tokens=8000,
+                            temperature=0,
+                            timeout=300.0,
+                            messages=[{
+                                "role": "user",
+                                "content": simplified_prompt
+                            }]
+                        )
+                    except Exception as retry_error:
+                        self.logger.error(f"Retry also failed: {retry_error}")
+                        raise Exception(f"API connection failed after retry: {str(e)}")
                 else:
                     raise
 
