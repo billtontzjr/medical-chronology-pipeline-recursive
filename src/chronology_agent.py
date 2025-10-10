@@ -121,8 +121,8 @@ class ChronologyAgent:
                 with open(txt_file, 'r', encoding='utf-8') as f:
                     content = f.read()
 
-                    # Chunk if too large (40K chars = ~160K tokens with overhead)
-                    chunks = self._chunk_large_document(txt_file.name, content, max_chunk_chars=40000)
+                    # Chunk if too large (20K chars = ~80K tokens with overhead, very conservative)
+                    chunks = self._chunk_large_document(txt_file.name, content, max_chunk_chars=20000)
                     documents.extend(chunks)
 
                     if len(chunks) > 1:
@@ -225,7 +225,8 @@ Do NOT include header or JSON - just the chronology entries."""
 
             # Dynamic batching based on estimated token size
             # Estimate: ~4 chars per token (conservative)
-            MAX_BATCH_TOKENS = 150000  # Stay well under 200K limit
+            # Very conservative limit to account for prompt overhead
+            MAX_BATCH_TOKENS = 60000  # Much smaller batches to stay well under 200K with prompts
 
             batches = []
             current_batch = []
