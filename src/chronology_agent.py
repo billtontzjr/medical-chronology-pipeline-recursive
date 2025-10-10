@@ -137,7 +137,7 @@ Then write the gaps analysis."""
 
             try:
                 response = self.client.messages.create(
-                    model="claude-3-5-sonnet-20241022",  # Latest Claude 3.5 Sonnet
+                    model="claude-sonnet-4-5-20250929",  # Claude Sonnet 4.5 with enhanced memory
                     max_tokens=16000,
                     temperature=0,
                     timeout=300.0,  # 5 minute timeout
@@ -166,7 +166,7 @@ Output the chronology in markdown format."""
 
                     try:
                         response = self.client.messages.create(
-                            model="claude-3-5-sonnet-20241022",
+                            model="claude-sonnet-4-5-20250929",
                             max_tokens=8000,
                             temperature=0,
                             timeout=300.0,
