@@ -62,8 +62,57 @@ class ChronologyAgent:
             self.logger.warning("CLAUDE.md not found, using basic rules")
             return "Generate a medical chronology from the provided documents."
 
+    def _chunk_large_document(self, filename: str, content: str, max_chunk_chars: int = 40000) -> List[Dict[str, str]]:
+        """
+        Split a large document into smaller chunks.
+
+        Args:
+            filename: Original filename
+            content: Document content
+            max_chunk_chars: Maximum characters per chunk
+
+        Returns:
+            List of document chunks
+        """
+        if len(content) <= max_chunk_chars:
+            return [{'filename': filename, 'content': content}]
+
+        # Split into chunks
+        chunks = []
+        words = content.split()
+        current_chunk = []
+        current_length = 0
+
+        for word in words:
+            word_length = len(word) + 1  # +1 for space
+            if current_length + word_length > max_chunk_chars and current_chunk:
+                # Save current chunk
+                chunk_text = ' '.join(current_chunk)
+                chunk_num = len(chunks) + 1
+                chunks.append({
+                    'filename': f"{filename} (part {chunk_num})",
+                    'content': chunk_text
+                })
+                current_chunk = [word]
+                current_length = word_length
+            else:
+                current_chunk.append(word)
+                current_length += word_length
+
+        # Add final chunk
+        if current_chunk:
+            chunk_text = ' '.join(current_chunk)
+            chunk_num = len(chunks) + 1
+            chunks.append({
+                'filename': f"{filename} (part {chunk_num})",
+                'content': chunk_text
+            })
+
+        self.logger.info(f"Split {filename} into {len(chunks)} chunks")
+        return chunks
+
     def _read_extracted_files(self, input_dir: str) -> List[Dict[str, str]]:
-        """Read all extracted text files from the input directory."""
+        """Read all extracted text files from the input directory and chunk large ones."""
         input_path = Path(input_dir)
         documents = []
 
@@ -71,11 +120,15 @@ class ChronologyAgent:
             try:
                 with open(txt_file, 'r', encoding='utf-8') as f:
                     content = f.read()
-                    documents.append({
-                        'filename': txt_file.name,
-                        'content': content
-                    })
-                    self.logger.info(f"Loaded {txt_file.name} ({len(content)} chars)")
+
+                    # Chunk if too large (40K chars = ~160K tokens with overhead)
+                    chunks = self._chunk_large_document(txt_file.name, content, max_chunk_chars=40000)
+                    documents.extend(chunks)
+
+                    if len(chunks) > 1:
+                        self.logger.info(f"Loaded {txt_file.name} ({len(content)} chars) → {len(chunks)} chunks")
+                    else:
+                        self.logger.info(f"Loaded {txt_file.name} ({len(content)} chars)")
             except Exception as e:
                 self.logger.error(f"Failed to read {txt_file.name}: {e}")
 
