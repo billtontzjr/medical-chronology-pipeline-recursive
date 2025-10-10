@@ -23,7 +23,12 @@ class ChronologyAgent:
         Args:
             api_key: Anthropic API key
         """
-        self.client = Anthropic(api_key=api_key)
+        # Configure with longer timeout for large documents
+        self.client = Anthropic(
+            api_key=api_key,
+            timeout=300.0,  # 5 minute default timeout
+            max_retries=3
+        )
         self.logger = logging.getLogger(__name__)
 
     def _load_rules(self, base_dir: str) -> str:
@@ -126,18 +131,37 @@ Then write the executive summary.
 Then write "---GAPS---" on its own line.
 Then write the gaps analysis."""
 
-            # Call Claude
+            # Call Claude with timeout handling
             self.logger.info("Calling Claude API...")
 
-            response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=16000,
-                temperature=0,
-                messages=[{
-                    "role": "user",
-                    "content": prompt
-                }]
-            )
+            try:
+                response = self.client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=16000,
+                    temperature=0,
+                    timeout=300.0,  # 5 minute timeout
+                    messages=[{
+                        "role": "user",
+                        "content": prompt
+                    }]
+                )
+            except Exception as e:
+                self.logger.error(f"API call failed: {e}")
+                # Try with smaller max_tokens if it's a size issue
+                if "length" in str(e).lower() or "token" in str(e).lower():
+                    self.logger.info("Retrying with reduced token limit...")
+                    response = self.client.messages.create(
+                        model="claude-sonnet-4-20250514",
+                        max_tokens=8000,
+                        temperature=0,
+                        timeout=300.0,
+                        messages=[{
+                            "role": "user",
+                            "content": prompt
+                        }]
+                    )
+                else:
+                    raise
 
             # Parse response
             full_response = response.content[0].text
