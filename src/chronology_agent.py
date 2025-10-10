@@ -170,10 +170,33 @@ Do NOT include header or JSON - just the chronology entries."""
                     'error': 'No extracted text files found'
                 }
 
-            # Batch processing for large document sets
-            BATCH_SIZE = 12  # Process 12 documents at a time to stay under token limits
-            batches = [documents[i:i + BATCH_SIZE] for i in range(0, len(documents), BATCH_SIZE)]
+            # Dynamic batching based on estimated token size
+            # Estimate: ~4 chars per token (conservative)
+            MAX_BATCH_TOKENS = 150000  # Stay well under 200K limit
+
+            batches = []
+            current_batch = []
+            current_batch_tokens = 0
+
+            for doc in documents:
+                # Estimate tokens for this document
+                doc_tokens = len(doc['content']) // 4
+
+                # If adding this doc would exceed limit, start new batch
+                if current_batch and (current_batch_tokens + doc_tokens) > MAX_BATCH_TOKENS:
+                    batches.append(current_batch)
+                    current_batch = [doc]
+                    current_batch_tokens = doc_tokens
+                else:
+                    current_batch.append(doc)
+                    current_batch_tokens += doc_tokens
+
+            # Add final batch
+            if current_batch:
+                batches.append(current_batch)
+
             total_batches = len(batches)
+            self.logger.info(f"Created {total_batches} batches from {len(documents)} documents")
 
             if progress_callback:
                 if total_batches > 1:
@@ -184,12 +207,15 @@ Do NOT include header or JSON - just the chronology entries."""
             # Process each batch
             batch_results = []
             for batch_num, batch in enumerate(batches, 1):
+                batch_docs = len(batch)
                 if progress_callback and total_batches > 1:
-                    progress_callback(f"📝 Processing batch {batch_num}/{total_batches}...")
+                    progress_callback(f"📝 Batch {batch_num}/{total_batches} ({batch_docs} documents)...")
+                elif progress_callback:
+                    progress_callback(f"📝 Processing {batch_docs} documents...")
 
                 batch_chronology = self._process_batch(batch, batch_num, total_batches)
                 batch_results.append(batch_chronology)
-                self.logger.info(f"Batch {batch_num}/{total_batches} completed")
+                self.logger.info(f"Batch {batch_num}/{total_batches} completed ({batch_docs} documents)")
 
             # Combine all batch results
             if progress_callback and total_batches > 1:
