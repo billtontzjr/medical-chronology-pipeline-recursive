@@ -81,6 +81,59 @@ class ChronologyAgent:
 
         return documents
 
+    def _process_batch(self, documents: List[Dict], batch_num: int, total_batches: int) -> str:
+        """
+        Process a batch of documents and return chronology markdown.
+
+        Args:
+            documents: List of document dictionaries
+            batch_num: Current batch number (1-indexed)
+            total_batches: Total number of batches
+
+        Returns:
+            Markdown chronology for this batch
+        """
+        self.logger.info(f"Processing batch {batch_num}/{total_batches} ({len(documents)} documents)")
+
+        # Build documents text for this batch
+        documents_text = "\n\n".join([
+            f"=== DOCUMENT: {doc['filename']} ===\n{doc['content']}"
+            for doc in documents
+        ])
+
+        # Condensed rules for batch processing
+        rules = """Create medical chronology entries following these rules:
+
+**Format**: [MM/DD/YYYY]. [Facility]. [Provider Name], [Credentials]. [Visit Type].
+Then one paragraph: Chief Complaint: ... History: ... Exam: ... Assessment: ... Plan: ...
+
+**Imaging**: ONLY Impression section
+**Therapy**: Consolidate follow-ups into one entry with all dates
+**Tone**: Direct, factual, clinical. In-paragraph headings.
+**Focus**: Orthopedic/spine/neuro findings. No routine vitals.
+**No Lists**: Convert bullets to sentences."""
+
+        prompt = f"""Generate chronology entries from these {len(documents)} medical documents.
+
+{rules}
+
+**DOCUMENTS:**
+{documents_text}
+
+**OUTPUT:**
+Write chronology entries in proper format, one entry per document/visit.
+Do NOT include header or JSON - just the chronology entries."""
+
+        # Call Claude
+        response = self.client.messages.create(
+            model="claude-sonnet-4-5-20250929",
+            max_tokens=8000,
+            temperature=0,
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        return response.content[0].text.strip()
+
     def generate_chronology(
         self,
         input_dir: str,
@@ -117,138 +170,104 @@ class ChronologyAgent:
                     'error': 'No extracted text files found'
                 }
 
-            # Build the prompt
+            # Batch processing for large document sets
+            BATCH_SIZE = 12  # Process 12 documents at a time to stay under token limits
+            batches = [documents[i:i + BATCH_SIZE] for i in range(0, len(documents), BATCH_SIZE)]
+            total_batches = len(batches)
+
             if progress_callback:
-                progress_callback(f"🤖 Generating chronology from {len(documents)} documents...")
+                if total_batches > 1:
+                    progress_callback(f"🤖 Processing {len(documents)} documents in {total_batches} batches...")
+                else:
+                    progress_callback(f"🤖 Generating chronology from {len(documents)} documents...")
 
-            # Prepare document content for Claude
-            documents_text = "\n\n".join([
-                f"=== DOCUMENT: {doc['filename']} ===\n{doc['content']}"
-                for doc in documents
-            ])
+            # Process each batch
+            batch_results = []
+            for batch_num, batch in enumerate(batches, 1):
+                if progress_callback and total_batches > 1:
+                    progress_callback(f"📝 Processing batch {batch_num}/{total_batches}...")
 
-            # Use condensed rules to stay under token limit
-            condensed_rules = """Create a medical chronology following these key rules:
+                batch_chronology = self._process_batch(batch, batch_num, total_batches)
+                batch_results.append(batch_chronology)
+                self.logger.info(f"Batch {batch_num}/{total_batches} completed")
 
-1. **Format**: [MM/DD/YYYY]. [Facility]. [Provider Name], [Credentials]. [Visit Type].
-   Then one paragraph with: Chief Complaint: ... History: ... Exam: ... Assessment: ... Plan: ...
+            # Combine all batch results
+            if progress_callback and total_batches > 1:
+                progress_callback(f"🔄 Combining {total_batches} batches into final chronology...")
 
-2. **Imaging Reports**: ONLY include the Impression section, nothing else.
+            # Simply concatenate entries (they're already in chronological order per batch)
+            combined_entries = "\n\n".join(batch_results)
 
-3. **Therapy Sessions**: Consolidate all follow-up visits into one entry with all dates listed.
+            # Now generate final chronology with header, summary, etc.
+            if progress_callback:
+                progress_callback(f"📋 Generating header and summary...")
 
-4. **Tone**: Direct, factual, clinical. Avoid narrative phrases. Use in-paragraph headings.
+            final_prompt = f"""You have chronology entries from {len(documents)} medical documents.
 
-5. **Focus**: Prioritize orthopedic/spine/neurological findings. Exclude routine vitals.
+Add a proper header and create summary/gaps analysis.
 
-6. **No Lists**: Convert all bullet points to complete sentences in paragraphs.
+**CHRONOLOGY ENTRIES:**
+{combined_entries}
 
-7. **Header**:
+**YOUR TASK:**
+1. Add header:
    MEDICAL RECORDS SUMMARY
-   [PATIENT NAME]
-   Date of Birth: [Date]
-   Date of Injury: [Date]"""
+   [Extract patient name from records]
+   Date of Birth: [Extract from records]
+   Date of Injury: [Extract from records]
 
-            prompt = f"""Generate a medical chronology from these OCR-extracted documents.
-
-{condensed_rules}
-
-**DOCUMENTS ({len(documents)} files):**
-{documents_text}
+2. Sort all entries chronologically
+3. Create executive summary
+4. Note any gaps or OCR issues
 
 **OUTPUT FORMAT:**
-Write the chronology in markdown.
-Then "---JSON---"
-Then JSON version.
+Write complete chronology with header.
 Then "---SUMMARY---"
 Then executive summary.
 Then "---GAPS---"
-Then gaps/OCR issues."""
+Then gaps analysis."""
 
-            # Call Claude with timeout handling
-            self.logger.info("Calling Claude API...")
-            self.logger.info(f"Prompt length: {len(prompt)} characters")
-            self.logger.info(f"Using model: claude-sonnet-4-5-20250929")
+            self.logger.info("Generating final chronology with header and summary...")
 
             try:
-                self.logger.info("Initiating API request...")
                 response = self.client.messages.create(
-                    model="claude-sonnet-4-5-20250929",  # Claude Sonnet 4.5 with enhanced memory
+                    model="claude-sonnet-4-5-20250929",
                     max_tokens=16000,
                     temperature=0,
-                    messages=[{
-                        "role": "user",
-                        "content": prompt
-                    }]
+                    messages=[{"role": "user", "content": final_prompt}]
                 )
-                self.logger.info("API request successful!")
+                self.logger.info("Final chronology generated successfully!")
             except Exception as e:
                 import traceback
-                import sys
-
-                self.logger.error(f"API call failed: {type(e).__name__}: {e}")
-                self.logger.error(f"Error type: {type(e).__module__}.{type(e).__name__}")
-                self.logger.error(f"Full error details: {repr(e)}")
+                self.logger.error(f"Final generation failed: {type(e).__name__}: {e}")
                 self.logger.error(f"Full traceback: {traceback.format_exc()}")
-
-                # Log additional network diagnostic info
-                if hasattr(e, '__cause__'):
-                    self.logger.error(f"Caused by: {type(e.__cause__).__name__}: {e.__cause__}")
-
-                # Check if it's a connection error - try once more with simpler request
-                if "connection" in str(e).lower() or "timeout" in str(e).lower():
-                    self.logger.info("Connection issue detected. Retrying with reduced prompt...")
-                    # Simplify prompt - send just the documents without full rules
-                    simplified_prompt = f"""Generate a medical chronology from these OCR-extracted documents.
-
-Create a chronological summary following standard medical chronology format.
-
-**DOCUMENTS:**
-{documents_text}
-
-Output the chronology in markdown format."""
-
-                    try:
-                        self.logger.info("Retrying with simplified prompt...")
-                        response = self.client.messages.create(
-                            model="claude-sonnet-4-5-20250929",
-                            max_tokens=8000,
-                            temperature=0,
-                            messages=[{
-                                "role": "user",
-                                "content": simplified_prompt
-                            }]
-                        )
-                        self.logger.info("Retry successful!")
-                    except Exception as retry_error:
-                        self.logger.error(f"Retry also failed: {retry_error}")
-                        raise Exception(f"API connection failed after retry: {str(e)}")
-                else:
-                    raise
+                raise
 
             # Parse response
             full_response = response.content[0].text
 
             # Split into sections
-            parts = full_response.split('---JSON---')
+            parts = full_response.split('---SUMMARY---')
             chronology_md = parts[0].strip()
 
             if len(parts) > 1:
                 remaining = parts[1]
-                json_parts = remaining.split('---SUMMARY---')
-                chronology_json_text = json_parts[0].strip()
-
-                if len(json_parts) > 1:
-                    summary_parts = json_parts[1].split('---GAPS---')
-                    summary_md = summary_parts[0].strip()
-                    gaps_md = summary_parts[1].strip() if len(summary_parts) > 1 else ""
-                else:
-                    summary_md = ""
-                    gaps_md = ""
+                summary_parts = remaining.split('---GAPS---')
+                summary_md = summary_parts[0].strip()
+                gaps_md = summary_parts[1].strip() if len(summary_parts) > 1 else ""
             else:
-                chronology_json_text = "{}"
-                summary_md = ""
-                gaps_md = ""
+                summary_md = "Generated from batched processing."
+                gaps_md = "Review individual documents for OCR quality."
+
+            # Generate simple JSON structure
+            chronology_json_text = f"""{{
+  "metadata": {{
+    "generated": "{datetime.now().isoformat()}",
+    "documents_processed": {len(documents)},
+    "batches": {total_batches}
+  }},
+  "chronology": "{chronology_md.replace('"', '\\"').replace('\n', '\\n')}"
+}}"""
 
             # Write output files
             output_path = Path(output_dir)
