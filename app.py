@@ -126,6 +126,7 @@ if generate_btn:
     else:
         # Initialize pipeline (OAuth credentials loaded from .env automatically)
         pipeline = MedicalChronologyPipeline(
+            dropbox_token=dropbox_refresh_token,
             google_api_key=google_api_key,
             anthropic_api_key=anthropic_api_key
         )
@@ -151,6 +152,7 @@ if generate_btn:
             if result['success']:
                 st.session_state.pipeline_result = result
                 st.session_state.pipeline_keys = {
+                    'dropbox_token': dropbox_refresh_token,
                     'google_api_key': google_api_key,
                     'anthropic_api_key': anthropic_api_key
                 }
@@ -307,6 +309,7 @@ elif st.session_state.pipeline_result is not None:
                 if st.session_state.pipeline_keys:
                     keys = st.session_state.pipeline_keys
                     pipeline = MedicalChronologyPipeline(
+                        dropbox_token=keys.get('dropbox_token'),
                         google_api_key=keys['google_api_key'],
                         anthropic_api_key=keys['anthropic_api_key']
                     )
