@@ -105,6 +105,12 @@ st.markdown("---")
 results_header = st.empty()
 results_container = st.container()
 
+# Initialize session state for storing results
+if 'pipeline_result' not in st.session_state:
+    st.session_state.pipeline_result = None
+if 'pipeline_keys' not in st.session_state:
+    st.session_state.pipeline_keys = None
+
 # Process pipeline
 if generate_btn:
     if not dropbox_configured:
@@ -140,6 +146,14 @@ if generate_btn:
                 return await pipeline.run_pipeline(dropbox_link, patient_id, progress_callback=update_progress)
 
             result = asyncio.run(run())
+
+            # Store result and API keys in session state for quality check
+            if result['success']:
+                st.session_state.pipeline_result = result
+                st.session_state.pipeline_keys = {
+                    'google_api_key': google_api_key,
+                    'anthropic_api_key': anthropic_api_key
+                }
 
             if result['success']:
                 status.update(label="✅ Pipeline completed successfully!", state="complete")
@@ -239,6 +253,97 @@ if generate_btn:
             status.update(label="❌ Pipeline failed", state="error")
             st.error(f"Unexpected error: {str(e)}")
             st.exception(e)
+
+# Display stored results from session state (for quality check persistence)
+elif st.session_state.pipeline_result is not None:
+    result = st.session_state.pipeline_result
+
+    # Show results header
+    results_header.header("📄 Generated Files")
+
+    with results_container:
+        # Create tabs for each output file
+        if result['output_files']:
+            tabs = st.tabs(list(result['output_files'].keys()))
+
+            for tab, (filename, filepath) in zip(tabs, result['output_files'].items()):
+                with tab:
+                    # Read file content
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        content = f.read()
+
+                    # Display preview
+                    if filename.endswith('.json'):
+                        st.json(content)
+                    else:
+                        st.markdown(content)
+
+                    # Download button
+                    st.download_button(
+                        label=f"⬇️ Download {filename}",
+                        data=content,
+                        file_name=filename,
+                        mime="application/json" if filename.endswith('.json') else "text/markdown"
+                    )
+
+            # Summary info
+            st.success(f"""
+            ### 🎉 Success!
+            - **Session ID:** {result['session_id']}
+            - **Files Processed:** {result['files_processed']}
+            - **Output Directory:** `{result['output_dir']}`
+            """)
+
+            if result['missing_files']:
+                st.warning(f"⚠️ Missing files: {', '.join(result['missing_files'])}")
+
+            # Quality check button
+            st.markdown("---")
+            st.subheader("🔍 Quality Verification")
+            st.info("Check for hallucinations or inaccuracies in the generated chronology against source documents.")
+
+            if st.button("🚀 Run Quality Check", type="secondary"):
+                # Reinitialize pipeline with stored API keys
+                if st.session_state.pipeline_keys:
+                    keys = st.session_state.pipeline_keys
+                    pipeline = MedicalChronologyPipeline(
+                        google_api_key=keys['google_api_key'],
+                        anthropic_api_key=keys['anthropic_api_key']
+                    )
+
+                    verification_status = st.status("🔍 Verifying chronology...", expanded=True)
+                    verification_progress = st.empty()
+
+                    def verification_callback(msg: str):
+                        with verification_progress:
+                            st.info(msg)
+
+                    # Run verification
+                    chronology_path = result['output_files'].get('chronology.md')
+                    if chronology_path:
+                        verification_result = pipeline.chronology_agent.verify_chronology(
+                            chronology_path=chronology_path,
+                            extracted_dir=result['extracted_dir'],
+                            progress_callback=verification_callback
+                        )
+
+                        if verification_result['success']:
+                            verification_status.update(label="✅ Verification complete!", state="complete")
+                            verification_progress.empty()
+
+                            st.markdown("### 📋 Verification Report")
+                            st.markdown(verification_result['verification'])
+
+                            st.info(f"Analyzed against {verification_result['documents_checked']} source documents")
+                        else:
+                            verification_status.update(label="❌ Verification failed", state="error")
+                            st.error(f"Error: {verification_result.get('error')}")
+                    else:
+                        st.error("Chronology file not found")
+                else:
+                    st.error("API keys not found in session state. Please regenerate the chronology.")
+        else:
+            st.warning("No output files were generated")
 
 # Footer
 st.markdown("---")
