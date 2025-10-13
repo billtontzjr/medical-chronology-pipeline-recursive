@@ -303,8 +303,9 @@ class DropboxTool:
 
                             try:
                                 # Download via shared link and path
-                                # Use filename with leading slash if path_display is None
-                                file_path = entry.path_display if entry.path_display else f"/{entry.name}"
+                                # For shared links, use the lower-case path_lower which is always set
+                                # Dropbox shared link API expects the path relative to the shared folder
+                                file_path = entry.path_lower if entry.path_lower else f"/{entry.name.lower()}"
 
                                 _, response = self.dbx.sharing_get_shared_link_file(
                                     shared_link,
