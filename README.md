@@ -12,6 +12,25 @@ This pipeline automates the process of:
 
 The generated chronologies follow strict medical-legal formatting standards suitable for spinal surgeons, life care planners, attorneys, and insurance companies.
 
+### Current Status
+
+- ✅ **Fully functional** for personal Dropbox folders
+- ✅ **Fully functional** for Dropbox Team folders (using shared links)
+- ✅ **OAuth 2.0 Support** - Never expire tokens with automatic refresh
+- ✅ **Deployed** to Render at https://medical-chronology-app.onrender.com
+- ✅ **Recent Updates:**
+  - OAuth 2.0 with refresh tokens (never expires!)
+  - Date format changed from `[MM/DD/YYYY]` to `MM/DD/YYYY` (removed brackets)
+  - Added quality verification feature to check for hallucinations
+  - Team folder access enabled via shared links
+
+### Key Requirements
+
+- **Dropbox Authentication:** OAuth 2.0 (recommended, never expires) or legacy tokens (expires every 4 hours)
+- **Dropbox Team Folders:** Must use shared links, not direct folder paths
+- **Dropbox Permissions:** Pure user-level scopes (no team scopes)
+- **API Keys:** Dropbox OAuth, Google Cloud Vision, and Anthropic Claude
+
 ## Architecture
 
 ```
@@ -49,9 +68,69 @@ The generated chronologies follow strict medical-legal formatting standards suit
 
 - **Python 3.10+**
 - **API Keys:**
-  - Dropbox Access Token
+  - Dropbox OAuth Credentials (App Key, App Secret, Access Token)
   - Google Cloud Vision API Key
   - Anthropic API Key
+
+## Quick Start (New Machine Setup)
+
+If you're setting this up on a new machine (e.g., Mac Mini at home):
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/billtontzjr/medical-chronology-pipeline.git
+cd medical-chronology-pipeline
+
+# 2. Create and activate virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Transfer your .env file from MacBook Air
+# Option A: Use AirDrop, iCloud Drive, or USB to copy .env file
+# Option B: Manually create .env file (see "Configure Environment" section below)
+scp billtontz@macbook-air.local:/Users/billtontz/medical-chronology-pipeline/.env .env
+# (adjust path and hostname as needed for your network setup)
+
+# 5. Run the web app
+streamlit run app.py
+```
+
+The app will open in your browser at `http://localhost:8501`
+
+### Syncing Code Between Machines
+
+This repository is hosted on GitHub. To sync changes between your MacBook Air and Mac Mini:
+
+```bash
+# On MacBook Air (after making changes):
+git add .
+git commit -m "Description of changes"
+git push origin main
+
+# On Mac Mini (to get latest changes):
+git pull origin main
+```
+
+**Important:** The `.env` file is gitignored for security. You must manually transfer it between machines using AirDrop, iCloud Drive, scp, or USB.
+
+### Working with Team Folders
+
+**Important:** For Dropbox Team folders, you MUST use shared links, not direct folder paths.
+
+#### How to Access Team Folders:
+1. Open [Dropbox](https://www.dropbox.com) in your browser
+2. Navigate to your Team folder (e.g., "Tontz Team Folder")
+3. Right-click the folder → **Share** → **Create link**
+4. Copy the shared link (format: `https://www.dropbox.com/scl/fo/...`)
+5. Paste this shared link into the app's "Dropbox Folder URL" field
+
+**Why shared links are required:**
+- Direct paths (e.g., `/home/Tontz Team Folder/...`) require team-level API access
+- Shared links work with user-level tokens and bypass team restrictions
+- This approach works for both personal folders and Team folders
 
 ## Installation
 
@@ -97,15 +176,73 @@ ANTHROPIC_API_KEY=your_anthropic_api_key_here
 
 ## Getting API Keys
 
-### Dropbox Access Token
+### Dropbox OAuth (Recommended - Never Expires!)
+
+**Use OAuth 2.0 with refresh tokens for permanent access that never expires.**
+
+#### Quick Setup:
+
+1. See detailed instructions in [OAUTH_SETUP.md](OAUTH_SETUP.md)
+2. Or follow the quick version below:
+
+#### Quick Version:
+
+1. Go to [Dropbox App Console](https://www.dropbox.com/developers/apps)
+2. Click **"Create App"** → **Scoped access** → **Full Dropbox**
+3. Name your app (e.g., `medical-chronology-pipeline`)
+4. **Permissions** tab - Enable these Individual Scopes ONLY:
+   - ✅ `account_info.read`
+   - ✅ `files.metadata.read`
+   - ✅ `files.content.read`
+   - ✅ `sharing.read`
+   - ❌ **NO** Team scopes
+5. **Settings** tab → Add redirect URI: `http://localhost:8501`
+6. Copy your **App key** and **App secret**
+7. Add to your `.env` file:
+   ```bash
+   DROPBOX_APP_KEY=your_app_key_here
+   DROPBOX_APP_SECRET=your_app_secret_here
+   DROPBOX_REFRESH_TOKEN=
+   ```
+8. Run the setup script:
+   ```bash
+   python setup_dropbox_oauth.py
+   ```
+9. Follow the prompts to authorize and get your refresh token
+
+**Benefits:**
+- ✅ Never expires - set it up once and forget it
+- ✅ Automatically refreshes access tokens
+- ✅ No more manual token regeneration every 4 hours
+
+---
+
+### Legacy: Dropbox Access Token (Not Recommended)
+
+<details>
+<summary>Click to expand legacy token instructions (expires every 4 hours)</summary>
 
 1. Go to [Dropbox App Console](https://www.dropbox.com/developers/apps)
 2. Click **"Create App"**
 3. Choose: **Scoped access** → **Full Dropbox**
 4. Name your app (e.g., `medical-chronology-pipeline`)
-5. In app settings, scroll to **"OAuth 2"** section
-6. Click **"Generate"** under "Generated access token"
-7. Copy the token to your `.env` file
+5. In the **Permissions** tab, enable these Individual Scopes:
+   - ✅ `account_info.read`
+   - ✅ `files.metadata.read`
+   - ✅ `files.content.read`
+   - ✅ `sharing.read`
+   - ❌ **DO NOT** enable any Team scopes (this breaks Team folder access)
+6. Click **"Submit"** to save permissions
+7. Go to **Settings** tab, scroll to **"OAuth 2"** section
+8. Click **"Generate"** under "Generated access token"
+9. Copy the token to your `.env` file as `DROPBOX_ACCESS_TOKEN`
+
+**Important Notes:**
+- Access tokens expire after 4 hours - you'll need to regenerate periodically
+- ANY team scope converts the token to team-level, which requires different API headers
+- For Team folders, use shared links (see "Working with Team Folders" section above)
+
+</details>
 
 ### Google Cloud Vision API Key
 
@@ -126,7 +263,27 @@ ANTHROPIC_API_KEY=your_anthropic_api_key_here
 
 ## Usage
 
-### Basic Usage
+### Web App (Recommended)
+
+Run the Streamlit web application:
+
+```bash
+streamlit run app.py
+```
+
+Then in your browser:
+1. Click **"📂 Open Dropbox"** button to open Dropbox in a new tab
+2. Navigate to the patient folder (personal or Team folder)
+3. Right-click folder → **Share** → **Create link** (for Team folders)
+4. Copy the URL from your browser or the shared link
+5. Paste into the "Dropbox Folder URL" field
+6. Enter patient ID (e.g., `john_doe`)
+7. Click **"🚀 Generate Chronology"**
+8. Download the generated files
+
+**For Team Folders:** Always use shared links (step 3), not direct browser URLs.
+
+### Command Line Usage
 
 Run the pipeline with a Dropbox shared link:
 
@@ -286,10 +443,24 @@ pytest tests/
 - Ensure `.env` file exists and contains all three API keys
 - Check that keys are not empty or placeholder values
 
-### "Dropbox download failed"
-- Verify Dropbox access token is valid (tokens expire after 4 hours for new apps)
+### "Dropbox download failed" or "expired_access_token"
+- **Solution**: Switch to OAuth (never expires) - see [OAUTH_SETUP.md](OAUTH_SETUP.md)
+- If using OAuth, verify all three credentials are set: `DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`, `DROPBOX_REFRESH_TOKEN`
+- If using legacy tokens, regenerate access token (expires every 4 hours)
 - Ensure shared link is accessible and contains PDF files
 - Check Dropbox app permissions include `files.content.read`
+
+### "Team folder not accessible" or "path not found"
+- **Solution:** Use shared links, NOT direct folder paths
+- Team folders require shared links (format: `https://www.dropbox.com/scl/fo/...`)
+- Direct paths (e.g., `/home/Tontz Team Folder/...`) will fail with user-level tokens
+- See "Working with Team Folders" section for detailed instructions
+
+### "OAuth 2 access token is for entire Dropbox Business team"
+- This means you have team scopes enabled in your Dropbox app
+- **Solution:** Remove ALL team scopes from your Dropbox app permissions
+- Generate a new token with only Individual Scopes (see "Getting API Keys" section)
+- Use shared links to access Team folders instead
 
 ### "OCR failed"
 - Verify Google Cloud Vision API key is valid
