@@ -302,14 +302,12 @@ class DropboxTool:
                             local_path = os.path.join(local_dir, entry.name)
 
                             try:
-                                # Download via shared link and path
-                                # For shared links, use the lower-case path_lower which is always set
-                                # Dropbox shared link API expects the path relative to the shared folder
-                                file_path = entry.path_lower if entry.path_lower else f"/{entry.name.lower()}"
-
+                                # Download via shared link with filename only
+                                # When downloading from shared folder, path should be just filename
+                                # without leading slash (relative to shared folder root)
                                 _, response = self.dbx.sharing_get_shared_link_file(
                                     shared_link,
-                                    path=file_path
+                                    path="/" + entry.name
                                 )
 
                                 Path(local_path).parent.mkdir(parents=True, exist_ok=True)
@@ -322,9 +320,11 @@ class DropboxTool:
                                     'name': entry.name
                                 })
                             except Exception as e:
+                                import logging
+                                logging.error(f"Failed to download {entry.name}: {type(e).__name__}: {str(e)}")
                                 results['failed'].append({
                                     'name': entry.name,
-                                    'error': str(e)
+                                    'error': f"{type(e).__name__}: {str(e)}"
                                 })
                                 results['success'] = False
                         else:
