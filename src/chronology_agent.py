@@ -2,13 +2,14 @@
 
 import os
 import json
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Callable
 from datetime import datetime
 import logging
 
 try:
-    from anthropic import Anthropic
+    from anthropic import Anthropic, APIError, APIStatusError
     import httpx
 except ImportError:
     raise ImportError("anthropic package not installed. Run: pip install anthropic")
@@ -51,6 +52,72 @@ class ChronologyAgent:
             max_retries=5  # More retries for network issues
         )
         self.logger = logging.getLogger(__name__)
+
+    def _call_api_with_retry(self, prompt: str, max_tokens: int = 8000, max_retries: int = 5) -> str:
+        """
+        Call Anthropic API with exponential backoff retry logic for overload errors.
+
+        Args:
+            prompt: The prompt to send to Claude
+            max_tokens: Maximum tokens in response
+            max_retries: Maximum number of retry attempts
+
+        Returns:
+            Response text from Claude
+
+        Raises:
+            Exception: If all retries fail
+        """
+        base_delay = 2  # Start with 2 second delay
+
+        for attempt in range(max_retries):
+            try:
+                response = self.client.messages.create(
+                    model="claude-sonnet-4-5-20250929",
+                    max_tokens=max_tokens,
+                    temperature=0,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                return response.content[0].text.strip()
+
+            except (APIError, APIStatusError) as e:
+                error_message = str(e).lower()
+
+                # Check if this is an overload error (500 status with "overloaded" message)
+                is_overload = (
+                    "overload" in error_message or
+                    ("500" in error_message and "api_error" in error_message)
+                )
+
+                # Check if this is a rate limit error (429 status)
+                is_rate_limit = "429" in error_message or "rate" in error_message
+
+                if is_overload or is_rate_limit:
+                    if attempt < max_retries - 1:
+                        # Calculate exponential backoff with jitter
+                        delay = base_delay * (2 ** attempt) + (time.time() % 1)  # Add jitter
+
+                        error_type = "Overload" if is_overload else "Rate limit"
+                        self.logger.warning(
+                            f"{error_type} error on attempt {attempt + 1}/{max_retries}. "
+                            f"Retrying in {delay:.1f} seconds..."
+                        )
+                        time.sleep(delay)
+                        continue
+                    else:
+                        self.logger.error(f"Failed after {max_retries} attempts: {e}")
+                        raise Exception(f"API call failed after {max_retries} retries: {e}")
+                else:
+                    # For other API errors, don't retry
+                    self.logger.error(f"API error (non-retryable): {e}")
+                    raise
+
+            except Exception as e:
+                # For unexpected errors, don't retry
+                self.logger.error(f"Unexpected error: {e}")
+                raise
+
+        raise Exception(f"API call failed after {max_retries} attempts")
 
     def _load_rules(self, base_dir: str) -> str:
         """Load the CLAUDE.md rules file."""
@@ -199,16 +266,9 @@ If no issues found, state: "No significant issues detected."
 
 Begin your analysis:"""
 
-            # Call Claude
+            # Call Claude with retry logic
             self.logger.info("Running hallucination check...")
-            response = self.client.messages.create(
-                model="claude-sonnet-4-5-20250929",
-                max_tokens=4000,
-                temperature=0,
-                messages=[{"role": "user", "content": prompt}]
-            )
-
-            verification_result = response.content[0].text
+            verification_result = self._call_api_with_retry(prompt, max_tokens=4000)
 
             if progress_callback:
                 progress_callback("✅ Verification complete!")
@@ -269,15 +329,8 @@ Then one paragraph: Chief Complaint: ... History: ... Exam: ... Assessment: ... 
 Write chronology entries in proper format, one entry per document/visit.
 Do NOT include header or JSON - just the chronology entries."""
 
-        # Call Claude
-        response = self.client.messages.create(
-            model="claude-sonnet-4-5-20250929",
-            max_tokens=8000,
-            temperature=0,
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        return response.content[0].text.strip()
+        # Call Claude with retry logic
+        return self._call_api_with_retry(prompt, max_tokens=8000)
 
     def generate_chronology(
         self,
@@ -350,8 +403,10 @@ Do NOT include header or JSON - just the chronology entries."""
                 else:
                     progress_callback(f"🤖 Generating chronology from {len(documents)} documents...")
 
-            # Process each batch
+            # Process each batch with rate limiting
             batch_results = []
+            BATCH_DELAY = 3  # 3 second delay between batches to avoid overwhelming API
+
             for batch_num, batch in enumerate(batches, 1):
                 batch_docs = len(batch)
                 if progress_callback and total_batches > 1:
@@ -362,6 +417,11 @@ Do NOT include header or JSON - just the chronology entries."""
                 batch_chronology = self._process_batch(batch, batch_num, total_batches)
                 batch_results.append(batch_chronology)
                 self.logger.info(f"Batch {batch_num}/{total_batches} completed ({batch_docs} documents)")
+
+                # Add delay between batches (except after the last one)
+                if batch_num < total_batches:
+                    self.logger.info(f"Waiting {BATCH_DELAY}s before next batch (rate limiting)...")
+                    time.sleep(BATCH_DELAY)
 
             # Combine all batch results
             if progress_callback and total_batches > 1:
@@ -410,13 +470,15 @@ Please review the complete chronology below for detailed medical information."""
 - Note any documents that may require manual review for OCR quality"""
 
             # Generate simple JSON structure
+            # Escape the chronology text properly for JSON
+            chronology_escaped = chronology_md.replace('"', '\\"').replace('\n', '\\n')
             chronology_json_text = f"""{{
   "metadata": {{
     "generated": "{datetime.now().isoformat()}",
     "documents_processed": {len(documents)},
     "batches": {total_batches}
   }},
-  "chronology": "{chronology_md.replace('"', '\\"').replace('\n', '\\n')}"
+  "chronology": "{chronology_escaped}"
 }}"""
 
             # Write output files
