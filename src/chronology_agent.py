@@ -309,8 +309,17 @@ Begin your analysis:"""
         # Condensed rules for batch processing
         rules = """Create medical chronology entries following these rules:
 
-**Format**: MM/DD/YYYY. Facility. Provider Name, Credentials. Visit Type.
-Then one paragraph: Chief Complaint: ... History: ... Exam: ... Assessment: ... Plan: ...
+**Format**: MM/DD/YYYY. Facility. Provider Name, Credentials. Visit Type. Chief Complaint: ... History: ... Exam: ... Assessment: ... Plan: ...
+
+**CRITICAL FORMATTING RULES:**
+- Each date of service entry MUST be ONE CONTINUOUS PARAGRAPH with NO line breaks within the entry
+- All labels (Provider:, Chief Complaint:, Assessment:, Plan:, etc.) flow together in the same paragraph
+- The ONLY separator between different date entries is a SINGLE blank line
+- NEVER use horizontal rules (---) or multiple blank lines between entries
+
+**CRITICAL SORTING RULE:**
+- Output entries in STRICT CHRONOLOGICAL ORDER from OLDEST date first to MOST RECENT date last
+- Sort by date before generating output
 
 **Imaging**: ONLY Impression section
 **Therapy**: Consolidate follow-ups into one entry with all dates
