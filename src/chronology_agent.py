@@ -311,21 +311,57 @@ Begin your analysis:"""
 
 **Format**: MM/DD/YYYY. Facility. Provider Name, Credentials. Visit Type. Chief Complaint: ... History: ... Exam: ... Assessment: ... Plan: ...
 
-**CRITICAL FORMATTING RULES:**
+**1. CRITICAL CHRONOLOGICAL SORTING (HIGHEST PRIORITY):**
+- PRIMARY RULE: Output ALL entries in STRICT CHRONOLOGICAL ORDER from OLDEST date first to MOST RECENT date last
+- Parse and sort every entry by date before writing output
+- VERIFICATION STEP: Before presenting the final output, review all generated entries one last time to verify they are in strict chronological order (oldest to newest). Re-sort them if any are out of place.
+- This is the most critical requirement and must not fail
+
+**2. SUMMARIZATION & PRIORITIZATION RULES:**
+
+**Length Limit:**
+- Each date of service summary MUST be 5 to 7 sentences maximum
+- Be concise while maintaining clinical accuracy
+
+**Mandatory Content:**
+- ALWAYS include the Assessment and Plan in every entry
+- These are non-negotiable components
+
+**General Prioritization:**
+- Prioritize pertinent positive and negative findings from Physical Examination, Assessment, and Plan
+- Include subjective complaints (Chief Complaint/History) but keep them very brief
+- Focus on clinically relevant information only
+
+**Domain-Specific Emphasis:**
+
+For Orthopedic, Spine, or Pain Management visits:
+- Dedicate sentences to objective findings: range of motion, strength testing, neurologic examination, specific tenderness/palpation findings
+- Include imaging results if discussed
+- Always include full Assessment and complete Plan
+- Minimize subjective history to 1 sentence maximum
+
+For Laboratory or Radiology-Only reports:
+- Do NOT list individual lab results unless critically abnormal
+- Simply state what was done and general outcome (e.g., "Laboratory values obtained," "Labs reviewed, stable," or "CT scan of lumbar spine completed")
+- Include brief impression/findings only
+
+For all other visit types (general medical, follow-ups, etc.):
+- Briefly summarize main reason for visit (1 sentence)
+- Include Assessment
+- Include Plan
+- Keep other details minimal
+
+**3. FORMATTING RULES (MAINTAIN CURRENT FORMAT):**
 - Each date of service entry MUST be ONE CONTINUOUS PARAGRAPH with NO line breaks within the entry
 - All labels (Provider:, Chief Complaint:, Assessment:, Plan:, etc.) flow together in the same paragraph
 - The ONLY separator between different date entries is a SINGLE blank line
 - NEVER use horizontal rules (---) or multiple blank lines between entries
 
-**CRITICAL SORTING RULE:**
-- Output entries in STRICT CHRONOLOGICAL ORDER from OLDEST date first to MOST RECENT date last
-- Sort by date before generating output
-
-**Imaging**: ONLY Impression section
-**Therapy**: Consolidate follow-ups into one entry with all dates
-**Tone**: Direct, factual, clinical. In-paragraph headings.
-**Focus**: Orthopedic/spine/neuro findings. No routine vitals.
-**No Lists**: Convert bullets to sentences."""
+**Additional Guidelines:**
+- Tone: Direct, factual, clinical language with in-paragraph headings
+- No bulleted lists: Convert all bullets to flowing sentences
+- Imaging reports: Include only Impression section
+- Therapy notes: Consolidate multiple follow-up sessions into one entry listing all dates"""
 
         prompt = f"""Generate chronology entries from these {len(documents)} medical documents.
 
