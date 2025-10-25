@@ -3,8 +3,9 @@
 import os
 import json
 import time
+import re
 from pathlib import Path
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Tuple
 from datetime import datetime
 import logging
 
@@ -129,6 +130,72 @@ class ChronologyAgent:
             self.logger.warning("CLAUDE.md not found, using basic rules")
             return "Generate a medical chronology from the provided documents."
 
+    def _parse_entry_date(self, entry: str) -> Optional[datetime]:
+        """
+        Parse the date from the beginning of a chronology entry.
+        
+        Args:
+            entry: A chronology entry paragraph starting with MM/DD/YYYY
+            
+        Returns:
+            datetime object if date found and valid, None otherwise
+        """
+        # Match MM/DD/YYYY at the start of the entry
+        date_pattern = r'^(\d{1,2})/(\d{1,2})/(\d{4})'
+        match = re.match(date_pattern, entry.strip())
+        
+        if match:
+            try:
+                month, day, year = match.groups()
+                return datetime(int(year), int(month), int(day))
+            except (ValueError, TypeError) as e:
+                self.logger.warning(f"Invalid date found in entry: {match.group(0)} - {e}")
+                return None
+        return None
+    
+    def _sort_entries_chronologically(self, entries_text: str) -> str:
+        """
+        Sort chronology entries by date, oldest to newest.
+        
+        Args:
+            entries_text: Combined chronology entries (may be from multiple batches)
+            
+        Returns:
+            Sorted entries joined with double newlines
+        """
+        # Split into individual entries (separated by double newlines)
+        entries = [e.strip() for e in entries_text.split('\n\n') if e.strip()]
+        
+        if not entries:
+            return entries_text
+        
+        # Parse dates and create (date, entry) tuples
+        dated_entries: List[Tuple[Optional[datetime], str]] = []
+        entries_without_dates: List[str] = []
+        
+        for entry in entries:
+            parsed_date = self._parse_entry_date(entry)
+            if parsed_date:
+                dated_entries.append((parsed_date, entry))
+            else:
+                # Keep entries without parseable dates at the end
+                entries_without_dates.append(entry)
+                self.logger.warning(f"Entry without valid date will be placed at end: {entry[:100]}...")
+        
+        # Sort by date (oldest first)
+        dated_entries.sort(key=lambda x: x[0])
+        
+        # Extract just the entry text (not the date)
+        sorted_entries = [entry for _, entry in dated_entries]
+        
+        # Add entries without dates at the end
+        sorted_entries.extend(entries_without_dates)
+        
+        self.logger.info(f"Sorted {len(dated_entries)} dated entries chronologically, {len(entries_without_dates)} entries without dates placed at end")
+        
+        # Join with double newlines
+        return '\n\n'.join(sorted_entries)
+    
     def _chunk_large_document(self, filename: str, content: str, max_chunk_chars: int = 40000) -> List[Dict[str, str]]:
         """
         Split a large document into smaller chunks.
@@ -468,12 +535,18 @@ Do NOT include header or JSON - just the chronology entries."""
                     self.logger.info(f"Waiting {BATCH_DELAY}s before next batch (rate limiting)...")
                     time.sleep(BATCH_DELAY)
 
-            # Combine all batch results
+            # Combine all batch results and perform global sort
             if progress_callback and total_batches > 1:
-                progress_callback(f"🔄 Combining {total_batches} batches into final chronology...")
+                progress_callback(f"🔄 Combining {total_batches} batches and sorting chronologically...")
+            elif progress_callback:
+                progress_callback(f"🔄 Sorting entries chronologically...")
 
-            # Simply concatenate entries (they're already in chronological order per batch)
+            # First, concatenate all batch results
             combined_entries = "\n\n".join(batch_results)
+            
+            # Perform global chronological sort on all entries
+            self.logger.info("Performing global chronological sort on all entries...")
+            combined_entries = self._sort_entries_chronologically(combined_entries)
 
             # Add header manually (don't send all entries back to API - too large)
             if progress_callback:
