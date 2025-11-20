@@ -190,11 +190,15 @@ if generate_btn:
                                 )
 
                         # Summary info
+                        dropbox_info = ""
+                        if result.get('dropbox_upload', {}).get('success'):
+                            dropbox_info = f"\n                        - **Dropbox:** ✅ Uploaded to `{result.get('dropbox_path')}`"
+                        
                         st.success(f"""
                         ### 🎉 Success!
                         - **Session ID:** {result['session_id']}
                         - **Files Processed:** {result['files_processed']}
-                        - **Output Directory:** `{result['output_dir']}`
+                        - **Output Directory:** `{result['output_dir']}`{dropbox_info}
                         """)
 
                         if result['missing_files']:
@@ -289,11 +293,15 @@ elif st.session_state.pipeline_result is not None:
                     )
 
             # Summary info
+            dropbox_info = ""
+            if result.get('dropbox_upload', {}).get('success'):
+                dropbox_info = f"\n            - **Dropbox:** ✅ Uploaded to `{result.get('dropbox_path')}`"
+            
             st.success(f"""
             ### 🎉 Success!
             - **Session ID:** {result['session_id']}
             - **Files Processed:** {result['files_processed']}
-            - **Output Directory:** `{result['output_dir']}`
+            - **Output Directory:** `{result['output_dir']}`{dropbox_info}
             """)
 
             if result['missing_files']:

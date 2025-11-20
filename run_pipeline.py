@@ -60,6 +60,16 @@ def validate_output(result: dict):
 
     print(f"\n📂 Output directory: {result['output_dir']}")
 
+    # Display Dropbox upload results
+    dropbox_upload = result.get('dropbox_upload', {})
+    if dropbox_upload:
+        if dropbox_upload.get('success'):
+            print(f"\n☁️  Dropbox upload:")
+            print(f"   ✅ Uploaded {len(dropbox_upload['uploaded'])} files")
+            print(f"   📁 Location: {result.get('dropbox_path')}")
+        else:
+            print(f"\n⚠️  Dropbox upload failed: {dropbox_upload.get('error')}")
+
     # Basic format validation for chronology.md
     chronology_path = output_files.get('chronology.md')
     if chronology_path:

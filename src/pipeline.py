@@ -175,6 +175,29 @@ class MedicalChronologyPipeline:
                     missing_files.append(filename)
                     self.logger.warning(f"✗ Missing: {filename}")
 
+            # Phase 5: Upload to Dropbox
+            self.logger.info("Phase 5: Uploading to Dropbox...")
+            if progress_callback:
+                progress_callback("📤 Uploading outputs to Dropbox...")
+
+            # Define Dropbox destination path
+            dropbox_base_path = "/Tontz Team Folder/Precision Life Care Planning/Confidential/Medical chronology pipeline outputs"
+            dropbox_session_path = f"{dropbox_base_path}/{session_id}"
+
+            upload_result = self.dropbox_tool.upload_folder(
+                local_dir=dirs['output'],
+                dropbox_folder=dropbox_session_path
+            )
+
+            if upload_result['success']:
+                self.logger.info(f"✓ Uploaded {len(upload_result['uploaded'])} files to Dropbox")
+                if progress_callback:
+                    progress_callback(f"✅ Uploaded {len(upload_result['uploaded'])} files to Dropbox")
+            else:
+                self.logger.warning(f"⚠️  Dropbox upload failed: {upload_result.get('error')}")
+                if progress_callback:
+                    progress_callback(f"⚠️  Dropbox upload failed: {upload_result.get('error')}")
+
             # Return results
             return {
                 'success': True,
@@ -185,7 +208,9 @@ class MedicalChronologyPipeline:
                 'output_dir': dirs['output'],
                 'output_files': output_files,
                 'missing_files': missing_files,
-                'agent_result': result
+                'agent_result': result,
+                'dropbox_upload': upload_result,
+                'dropbox_path': dropbox_session_path
             }
 
         except Exception as e:

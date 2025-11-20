@@ -343,3 +343,93 @@ class DropboxTool:
             results['error'] = f"Failed to download {len(results['failed'])} files: {failed_files}"
 
         return results
+
+    def upload_file(self, local_path: str, dropbox_path: str) -> Dict:
+        """
+        Upload a single file to Dropbox.
+
+        Args:
+            local_path: Path to local file
+            dropbox_path: Destination path in Dropbox (must start with /)
+
+        Returns:
+            Dictionary with upload result
+        """
+        try:
+            with open(local_path, 'rb') as f:
+                file_data = f.read()
+
+            # Upload file
+            metadata = self.dbx.files_upload(
+                file_data,
+                dropbox_path,
+                mode=dropbox.files.WriteMode.overwrite
+            )
+
+            return {
+                'success': True,
+                'dropbox_path': dropbox_path,
+                'size': metadata.size,
+                'name': metadata.name
+            }
+
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e),
+                'local_path': local_path,
+                'dropbox_path': dropbox_path
+            }
+
+    def upload_folder(self, local_dir: str, dropbox_folder: str, extensions: Optional[List[str]] = None) -> Dict:
+        """
+        Upload all files from a local directory to Dropbox.
+
+        Args:
+            local_dir: Local directory containing files
+            dropbox_folder: Destination folder in Dropbox (must start with /)
+            extensions: Optional list of file extensions to filter (e.g., ['.md', '.json'])
+
+        Returns:
+            Dictionary with upload results
+        """
+        results = {
+            'success': True,
+            'uploaded': [],
+            'failed': [],
+            'skipped': []
+        }
+
+        try:
+            # Ensure the destination folder exists in Dropbox
+            try:
+                self.dbx.files_create_folder_v2(dropbox_folder)
+            except dropbox.exceptions.ApiError as e:
+                # Folder may already exist, which is fine
+                if not 'path/conflict/folder' in str(e):
+                    raise
+
+            # Upload each file in the local directory
+            local_path_obj = Path(local_dir)
+            for file_path in local_path_obj.iterdir():
+                if file_path.is_file():
+                    # Check if file matches extension filter
+                    if extensions and not any(file_path.name.lower().endswith(ext.lower()) for ext in extensions):
+                        results['skipped'].append(file_path.name)
+                        continue
+
+                    # Upload file
+                    dropbox_file_path = f"{dropbox_folder}/{file_path.name}"
+                    upload_result = self.upload_file(str(file_path), dropbox_file_path)
+
+                    if upload_result['success']:
+                        results['uploaded'].append(upload_result)
+                    else:
+                        results['failed'].append(upload_result)
+                        results['success'] = False
+
+        except Exception as e:
+            results['success'] = False
+            results['error'] = str(e)
+
+        return results
