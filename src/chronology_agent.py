@@ -268,6 +268,83 @@ class ChronologyAgent:
 
         return documents
 
+    def _map_dates_to_documents(self, documents: List[Dict[str, str]]) -> Dict[str, List[Dict]]:
+        """
+        Map dates found in documents to the documents themselves.
+        
+        Args:
+            documents: List of document dictionaries
+            
+        Returns:
+            Dictionary mapping date strings (MM/DD/YYYY) to list of relevant documents
+        """
+        date_map = {}
+        date_pattern = r'(\d{1,2})/(\d{1,2})/(\d{4})'
+        
+        for doc in documents:
+            # Find all dates in the document
+            matches = re.finditer(date_pattern, doc['content'])
+            found_dates = set()
+            
+            for match in matches:
+                try:
+                    month, day, year = match.groups()
+                    # Normalize date format to MM/DD/YYYY
+                    date_obj = datetime(int(year), int(month), int(day))
+                    date_str = date_obj.strftime('%m/%d/%Y')
+                    found_dates.add(date_str)
+                except ValueError:
+                    continue
+            
+            # Add doc to map for each found date
+            for date_str in found_dates:
+                if date_str not in date_map:
+                    date_map[date_str] = []
+                date_map[date_str].append(doc)
+                
+        return date_map
+
+    def _verify_entry_batch(self, entries: List[str], relevant_docs: List[Dict]) -> str:
+        """
+        Verify a batch of entries against specific source documents.
+        """
+        if not entries or not relevant_docs:
+            return ""
+
+        entries_text = "\n\n".join(entries)
+        
+        # Prepare source text (limit length per doc to avoid context limits)
+        source_text = ""
+        for doc in relevant_docs:
+            source_text += f"=== DOCUMENT: {doc['filename']} ===\n{doc['content'][:15000]}\n\n"
+
+        prompt = f"""You are a medical record auditor. Verify these chronology entries against the provided source documents.
+
+**CHRONOLOGY ENTRIES TO VERIFY:**
+{entries_text}
+
+**SOURCE DOCUMENTS:**
+{source_text}
+
+**TASK:**
+Check each entry for:
+1. **Hallucinations**: Information NOT in source documents
+2. **Date Errors**: Wrong dates
+3. **Misattributions**: Wrong provider/facility
+4. **Exaggerations**: Facts overstated
+
+**OUTPUT FORMAT:**
+For EACH issue found, output EXACTLY this format:
+Entry Date: [date]
+Issue Type: [Hallucination/Date Error/Misattribution/Exaggeration]
+Description: [Specific description of the error and what the source actually says]
+Severity: [Critical/Moderate/Minor]
+
+If an entry is correct, DO NOT output anything for it.
+If no issues found in any entries, output "No issues found."
+"""
+        return self._call_api_with_retry(prompt, max_tokens=4000)
+
     def verify_chronology(
         self,
         chronology_path: str,
@@ -275,19 +352,11 @@ class ChronologyAgent:
         progress_callback: Optional[Callable[[str], None]] = None
     ) -> Dict:
         """
-        Verify chronology against source documents to detect hallucinations.
-
-        Args:
-            chronology_path: Path to generated chronology.md
-            extracted_dir: Directory with extracted text files
-            progress_callback: Optional progress callback
-
-        Returns:
-            Dictionary with verification results
+        Verify chronology against source documents using smart date matching.
         """
         try:
             if progress_callback:
-                progress_callback("🔍 Loading chronology and source documents...")
+                progress_callback("🔍 Loading documents for verification...")
 
             # Read chronology
             with open(chronology_path, 'r', encoding='utf-8') as f:
@@ -297,52 +366,78 @@ class ChronologyAgent:
             documents = self._read_extracted_files(extracted_dir)
 
             if progress_callback:
-                progress_callback(f"🤖 Analyzing chronology against {len(documents)} source documents...")
+                progress_callback(f"🧠 Mapping {len(documents)} documents by date...")
+            
+            # Map dates to documents
+            date_map = self._map_dates_to_documents(documents)
+            
+            # Parse chronology into entries
+            entries = [e.strip() for e in chronology_text.split('\n\n') if e.strip()]
+            # Skip header if present
+            if entries and "MEDICAL RECORDS SUMMARY" in entries[0]:
+                entries = entries[1:]
 
-            # Build verification prompt
-            source_summary = "\n\n".join([
-                f"=== {doc['filename']} ===\n{doc['content'][:2000]}..."  # First 2000 chars of each
-                for doc in documents[:10]  # Sample first 10 docs
-            ])
+            verification_results = []
+            
+            # Group entries by date
+            entries_by_date = {}
+            for entry in entries:
+                date_match = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})', entry)
+                if date_match:
+                    try:
+                        m, d, y = date_match.groups()
+                        date_obj = datetime(int(y), int(m), int(d))
+                        date_str = date_obj.strftime('%m/%d/%Y')
+                        
+                        if date_str not in entries_by_date:
+                            entries_by_date[date_str] = []
+                        entries_by_date[date_str].append(entry)
+                    except ValueError:
+                        continue
 
-            prompt = f"""You are a medical record auditor checking for hallucinations and inaccuracies.
+            total_dates = len(entries_by_date)
+            processed_dates = 0
 
-**CHRONOLOGY TO VERIFY:**
-{chronology_text[:10000]}
+            if progress_callback:
+                progress_callback(f"🕵️ Verifying {len(entries)} entries across {total_dates} dates...")
 
-**SOURCE DOCUMENTS (SAMPLE):**
-{source_summary}
+            # Verify each date group
+            for date_str, date_entries in entries_by_date.items():
+                processed_dates += 1
+                if progress_callback:
+                    progress_callback(f"Checking {date_str} ({processed_dates}/{total_dates})...")
 
-**YOUR TASK:**
-Review the chronology entries and identify any potential issues:
+                relevant_docs = date_map.get(date_str, [])
+                
+                if not relevant_docs:
+                    # No docs found for this date - flag as potential hallucination
+                    for entry in date_entries:
+                        verification_results.append(
+                            f"Entry Date: {date_str}\n"
+                            f"Issue Type: Potential Hallucination (No Source)\n"
+                            f"Description: No source documents found containing the date {date_str}. "
+                            f"This entry may be hallucinated or the date is incorrect.\n"
+                            f"Severity: Critical\n"
+                        )
+                    continue
 
-1. **Hallucinations**: Information in chronology NOT found in source documents
-2. **Date Errors**: Dates that don't match source documents
-3. **Misattributions**: Information attributed to wrong provider/facility
-4. **Exaggerations**: Facts overstated or added beyond source
-5. **Omissions**: Critical information missing from chronology
+                # Verify against relevant docs
+                result = self._verify_entry_batch(date_entries, relevant_docs)
+                if result and "No issues found" not in result:
+                    verification_results.append(result)
 
-**OUTPUT FORMAT:**
-For each issue found, provide:
-- Entry Date: [date from chronology]
-- Issue Type: [hallucination/date error/misattribution/etc]
-- Description: [what's wrong]
-- Severity: [critical/moderate/minor]
-
-If no issues found, state: "No significant issues detected."
-
-Begin your analysis:"""
-
-            # Call Claude with retry logic
-            self.logger.info("Running hallucination check...")
-            verification_result = self._call_api_with_retry(prompt, max_tokens=4000)
+            # Compile final report
+            if not verification_results:
+                final_report = "✅ No significant issues detected. All entries verified against source documents."
+            else:
+                final_report = "# ⚠️ Verification Issues Found\n\n" + "\n\n".join(verification_results)
 
             if progress_callback:
                 progress_callback("✅ Verification complete!")
 
             return {
                 'success': True,
-                'verification': verification_result,
+                'verification': final_report,
                 'documents_checked': len(documents)
             }
 
