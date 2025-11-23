@@ -283,7 +283,7 @@ class DropboxTool:
                 else:
                     results['skipped'].append(link_metadata.name)
 
-            # If it's a folder, list and download files
+            # If it's a folder, list and download files RECURSIVELY
             else:
                 # List folder contents
                 list_result = self.dbx.files_list_folder(
@@ -291,44 +291,64 @@ class DropboxTool:
                     shared_link=dropbox.files.SharedLink(url=shared_link)
                 )
 
-                for entry in list_result.entries:
-                    # Skip folders
-                    if isinstance(entry, FolderMetadata):
-                        continue
-
-                    if isinstance(entry, FileMetadata):
-                        if any(entry.name.lower().endswith(ext.lower())
-                              for ext in extensions):
-                            local_path = os.path.join(local_dir, entry.name)
-
+                # Process all entries (files and folders) recursively
+                def process_entries(entries_list, path_prefix=''):
+                    """Recursively process files and folders from shared link."""
+                    for entry in entries_list:
+                        # Process subfolders recursively
+                        if isinstance(entry, FolderMetadata):
+                            import logging
+                            logging.info(f"Entering subfolder: {entry.name}")
+                            
+                            # List subfolder contents
+                            subfolder_path = f"{path_prefix}/{entry.name}" if path_prefix else f"/{entry.name}"
                             try:
-                                # Download via shared link with filename only
-                                # When downloading from shared folder, path should be just filename
-                                # without leading slash (relative to shared folder root)
-                                _, response = self.dbx.sharing_get_shared_link_file(
-                                    shared_link,
-                                    path="/" + entry.name
+                                subfolder_result = self.dbx.files_list_folder(
+                                    subfolder_path,
+                                    shared_link=dropbox.files.SharedLink(url=shared_link)
                                 )
-
-                                Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-                                with open(local_path, 'wb') as f:
-                                    f.write(response.content)
-
-                                results['downloaded'].append({
-                                    'success': True,
-                                    'local_path': local_path,
-                                    'name': entry.name
-                                })
+                                # Recursively process subfolder entries
+                                process_entries(subfolder_result.entries, subfolder_path)
                             except Exception as e:
                                 import logging
-                                logging.error(f"Failed to download {entry.name}: {type(e).__name__}: {str(e)}")
-                                results['failed'].append({
-                                    'name': entry.name,
-                                    'error': f"{type(e).__name__}: {str(e)}"
-                                })
-                                results['success'] = False
-                        else:
-                            results['skipped'].append(entry.name)
+                                logging.error(f"Error listing subfolder {entry.name}: {e}")
+
+                        # Process files
+                        elif isinstance(entry, FileMetadata):
+                            if any(entry.name.lower().endswith(ext.lower())
+                                  for ext in extensions):
+                                local_path = os.path.join(local_dir, entry.name)
+
+                                try:
+                                    # Download via shared link
+                                    file_path = f"{path_prefix}/{entry.name}" if path_prefix else f"/{entry.name}"
+                                    _, response = self.dbx.sharing_get_shared_link_file(
+                                        shared_link,
+                                        path=file_path
+                                    )
+
+                                    Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+                                    with open(local_path, 'wb') as f:
+                                        f.write(response.content)
+
+                                    results['downloaded'].append({
+                                        'success': True,
+                                        'local_path': local_path,
+                                        'name': entry.name
+                                    })
+                                except Exception as e:
+                                    import logging
+                                    logging.error(f"Failed to download {entry.name}: {type(e).__name__}: {str(e)}")
+                                    results['failed'].append({
+                                        'name': entry.name,
+                                        'error': f"{type(e).__name__}: {str(e)}"
+                                    })
+                                    results['success'] = False
+                            else:
+                                results['skipped'].append(entry.name)
+                
+                # Start processing from root
+                process_entries(list_result.entries)
 
         except dropbox.exceptions.ApiError as e:
             results['success'] = False
