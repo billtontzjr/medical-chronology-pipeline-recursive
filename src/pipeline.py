@@ -181,7 +181,7 @@ class MedicalChronologyPipeline:
                 progress_callback("📤 Uploading outputs to Dropbox...")
 
             # Define Dropbox destination path
-            dropbox_base_path = "/Tontz Team Folder/Precision Life Care Planning/Confidential/Medical chronology pipeline outputs"
+            dropbox_base_path = "/Medical chronology pipeline outputs"
             dropbox_session_path = f"{dropbox_base_path}/{session_id}"
 
             upload_result = self.dropbox_tool.upload_folder(
