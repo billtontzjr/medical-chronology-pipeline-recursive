@@ -153,26 +153,129 @@ class ChronologyAgent:
                 return None
         return None
     
+    def _extract_entry_key(self, entry: str) -> Tuple[str, str, str]:
+        """
+        Extract a deduplication key from an entry: (date, facility, provider).
+
+        The entry header format is:
+        MM/DD/YYYY. Facility Name. Provider Name, Credentials. Visit Type.
+
+        Args:
+            entry: A chronology entry paragraph
+
+        Returns:
+            Tuple of (date_str, facility_lower, provider_lower) for dedup matching
+        """
+        first_line = entry.strip().split('\n')[0]
+
+        # Parse the header parts separated by '. '
+        parts = first_line.split('. ')
+
+        date_str = parts[0].strip() if len(parts) > 0 else ''
+        facility = parts[1].strip().lower() if len(parts) > 1 else ''
+        provider = parts[2].strip().lower() if len(parts) > 2 else ''
+
+        return (date_str, facility, provider)
+
+    def _enforce_single_paragraph(self, entry: str) -> str:
+        """
+        Flatten a multi-paragraph entry into a single paragraph.
+
+        Preserves the header line (date. facility. provider. visit type.)
+        and merges all subsequent lines/paragraphs into one continuous paragraph.
+
+        Args:
+            entry: A chronology entry that may contain multiple paragraphs
+
+        Returns:
+            Entry condensed to header + single summary paragraph
+        """
+        lines = entry.strip().split('\n')
+        if not lines:
+            return entry
+
+        # The header is the first line (date. facility. provider. visit type.)
+        header = lines[0].strip()
+
+        # Everything after the header is the body
+        body_lines = [l.strip() for l in lines[1:] if l.strip()]
+
+        if not body_lines:
+            return header
+
+        # Join all body lines into a single flowing paragraph
+        body = ' '.join(body_lines)
+
+        # Clean up any double spaces that may result from joining
+        body = re.sub(r'\s{2,}', ' ', body)
+
+        return f"{header}\n{body}"
+
+    def _deduplicate_entries(self, entries: List[str]) -> List[str]:
+        """
+        Remove duplicate entries and merge entries for the same date/facility/provider.
+
+        When duplicates are found (same date, facility, and provider), the longest
+        entry is kept. If entries share the same date and facility but different
+        providers, both are kept (they represent different visits).
+
+        Args:
+            entries: List of chronology entry strings
+
+        Returns:
+            Deduplicated list of entries
+        """
+        if not entries:
+            return entries
+
+        # Group entries by their dedup key
+        seen: Dict[Tuple[str, str, str], str] = {}
+        duplicates_removed = 0
+
+        for entry in entries:
+            key = self._extract_entry_key(entry)
+
+            if key in seen:
+                duplicates_removed += 1
+                existing = seen[key]
+                # Keep the longer/more detailed entry
+                if len(entry) > len(existing):
+                    seen[key] = entry
+            else:
+                seen[key] = entry
+
+        if duplicates_removed > 0:
+            self.logger.info(f"Removed {duplicates_removed} duplicate entries")
+
+        return list(seen.values())
+
     def _sort_entries_chronologically(self, entries_text: str) -> str:
         """
-        Sort chronology entries by date, oldest to newest.
-        
+        Sort chronology entries by date (oldest to newest), deduplicate,
+        and enforce single-paragraph format.
+
         Args:
             entries_text: Combined chronology entries (may be from multiple batches)
-            
+
         Returns:
-            Sorted entries joined with double newlines
+            Sorted, deduplicated entries joined with double newlines
         """
         # Split into individual entries (separated by double newlines)
         entries = [e.strip() for e in entries_text.split('\n\n') if e.strip()]
-        
+
         if not entries:
             return entries_text
-        
-        # Parse dates and create (date, entry) tuples
+
+        # Step 1: Enforce single-paragraph format on each entry
+        entries = [self._enforce_single_paragraph(e) for e in entries]
+
+        # Step 2: Deduplicate entries with same date/facility/provider
+        entries = self._deduplicate_entries(entries)
+
+        # Step 3: Parse dates and sort chronologically
         dated_entries: List[Tuple[Optional[datetime], str]] = []
         entries_without_dates: List[str] = []
-        
+
         for entry in entries:
             parsed_date = self._parse_entry_date(entry)
             if parsed_date:
@@ -181,18 +284,21 @@ class ChronologyAgent:
                 # Keep entries without parseable dates at the end
                 entries_without_dates.append(entry)
                 self.logger.warning(f"Entry without valid date will be placed at end: {entry[:100]}...")
-        
+
         # Sort by date (oldest first)
         dated_entries.sort(key=lambda x: x[0])
-        
+
         # Extract just the entry text (not the date)
         sorted_entries = [entry for _, entry in dated_entries]
-        
+
         # Add entries without dates at the end
         sorted_entries.extend(entries_without_dates)
-        
-        self.logger.info(f"Sorted {len(dated_entries)} dated entries chronologically, {len(entries_without_dates)} entries without dates placed at end")
-        
+
+        self.logger.info(
+            f"Post-processing complete: {len(sorted_entries)} entries "
+            f"(sorted {len(dated_entries)} dated, {len(entries_without_dates)} undated)"
+        )
+
         # Join with double newlines
         return '\n\n'.join(sorted_entries)
     
@@ -513,11 +619,18 @@ For all other visit types (general medical, follow-ups, etc.):
 - Include Plan
 - Keep other details minimal
 
-**3. FORMATTING RULES (MAINTAIN CURRENT FORMAT):**
+**3. DUPLICATE PREVENTION (CRITICAL):**
+- Create ONLY ONE entry per unique date + facility + provider combination
+- If multiple pages or sections of a document refer to the same visit, merge them into a SINGLE entry
+- Do NOT create separate entries for different sections (e.g., history, exam, plan) of the SAME visit
+- If two documents describe the same visit on the same date at the same facility, produce ONE combined entry
+
+**4. FORMATTING RULES (MAINTAIN CURRENT FORMAT):**
 - Each date of service entry MUST be ONE CONTINUOUS PARAGRAPH with NO line breaks within the entry
 - All labels (Provider:, Chief Complaint:, Assessment:, Plan:, etc.) flow together in the same paragraph
 - The ONLY separator between different date entries is a SINGLE blank line
 - NEVER use horizontal rules (---) or multiple blank lines between entries
+- NEVER split an entry into multiple paragraphs — keep everything in one flowing paragraph
 
 **Additional Guidelines:**
 - Tone: Direct, factual, clinical language with in-paragraph headings
