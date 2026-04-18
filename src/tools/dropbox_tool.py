@@ -1,12 +1,55 @@
 """Dropbox integration tool for downloading medical records."""
 
+import hashlib
+import logging
 import os
+import time
 from pathlib import Path
 from typing import List, Dict, Optional
 from urllib.parse import unquote, urlparse
 import dropbox
 from dropbox.files import FileMetadata, FolderMetadata
 from dropbox.sharing import SharedLinkMetadata
+
+
+logger = logging.getLogger(__name__)
+
+
+def normalize_dropbox_folder(path: str) -> str:
+    """Clean a user-provided Dropbox folder path.
+
+    - Strips surrounding whitespace
+    - Ensures a leading ``/``
+    - Removes trailing ``/``
+    - Collapses duplicate slashes
+    """
+    if not path:
+        return ""
+    p = path.strip()
+    if not p.startswith("/"):
+        p = "/" + p
+    # Collapse //
+    while "//" in p:
+        p = p.replace("//", "/")
+    if len(p) > 1 and p.endswith("/"):
+        p = p[:-1]
+    return p
+
+
+def _dropbox_content_hash(path: str) -> str:
+    """Compute Dropbox's content hash (SHA256 over 4 MiB blocks, then SHA256 of the concat).
+
+    Used to verify uploads match the local file byte-for-byte, not just by size.
+    """
+    block_size = 4 * 1024 * 1024
+    hasher = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(block_size)
+            if not chunk:
+                break
+            hasher.update(hashlib.sha256(chunk).digest())
+    return hasher.hexdigest()
 
 
 class DropboxTool:
@@ -364,92 +407,183 @@ class DropboxTool:
 
         return results
 
-    def upload_file(self, local_path: str, dropbox_path: str) -> Dict:
-        """
-        Upload a single file to Dropbox.
+    def ensure_folder(self, dropbox_folder: str) -> None:
+        """Create the destination folder (and parents) in Dropbox if missing.
 
-        Args:
-            local_path: Path to local file
-            dropbox_path: Destination path in Dropbox (must start with /)
-
-        Returns:
-            Dictionary with upload result
+        ``files_create_folder_v2`` creates intermediate folders automatically.
+        A ``path/conflict/folder`` error means the folder already exists —
+        that's fine.
         """
+        dropbox_folder = normalize_dropbox_folder(dropbox_folder)
+        if not dropbox_folder or dropbox_folder == "/":
+            return
         try:
-            with open(local_path, 'rb') as f:
-                file_data = f.read()
+            self.dbx.files_create_folder_v2(dropbox_folder)
+        except dropbox.exceptions.ApiError as e:
+            if "path/conflict/folder" in str(e):
+                return
+            # Some team environments may reject nested creation in one call;
+            # retry creating parents first.
+            parent = os.path.dirname(dropbox_folder)
+            if parent and parent != "/" and parent != dropbox_folder:
+                self.ensure_folder(parent)
+                try:
+                    self.dbx.files_create_folder_v2(dropbox_folder)
+                    return
+                except dropbox.exceptions.ApiError as e2:
+                    if "path/conflict/folder" in str(e2):
+                        return
+                    raise
+            raise
 
-            # Upload file
-            metadata = self.dbx.files_upload(
-                file_data,
-                dropbox_path,
-                mode=dropbox.files.WriteMode.overwrite
-            )
-
-            return {
-                'success': True,
-                'dropbox_path': dropbox_path,
-                'size': metadata.size,
-                'name': metadata.name
-            }
-
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e),
-                'local_path': local_path,
-                'dropbox_path': dropbox_path
-            }
-
-    def upload_folder(self, local_dir: str, dropbox_folder: str, extensions: Optional[List[str]] = None) -> Dict:
-        """
-        Upload all files from a local directory to Dropbox.
+    def upload_file(
+        self,
+        local_path: str,
+        dropbox_path: str,
+        *,
+        max_retries: int = 5,
+        verify: bool = True,
+    ) -> Dict:
+        """Upload one file with retry and optional content-hash verification.
 
         Args:
-            local_dir: Local directory containing files
-            dropbox_folder: Destination folder in Dropbox (must start with /)
-            extensions: Optional list of file extensions to filter (e.g., ['.md', '.json'])
+            local_path: Path to local file.
+            dropbox_path: Destination path in Dropbox (must start with ``/``).
+            max_retries: Number of upload attempts on transient errors.
+            verify: When True, compare Dropbox's content hash to the local
+                file's content hash after upload and fail if they differ.
 
         Returns:
-            Dictionary with upload results
+            ``{'success': bool, ...}``. On failure, includes ``error``.
         """
+        if not os.path.exists(local_path):
+            return {
+                "success": False,
+                "error": f"Local file not found: {local_path}",
+                "local_path": local_path,
+                "dropbox_path": dropbox_path,
+            }
+
+        local_size = os.path.getsize(local_path)
+        local_hash = _dropbox_content_hash(local_path) if verify else None
+
+        last_error: Optional[str] = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                with open(local_path, "rb") as f:
+                    file_data = f.read()
+
+                metadata = self.dbx.files_upload(
+                    file_data,
+                    dropbox_path,
+                    mode=dropbox.files.WriteMode.overwrite,
+                    mute=True,
+                )
+
+                # Verify via size + content hash
+                if metadata.size != local_size:
+                    last_error = (
+                        f"Size mismatch after upload: local={local_size}, "
+                        f"remote={metadata.size}"
+                    )
+                    logger.warning("%s — retry %d/%d", last_error, attempt, max_retries)
+                elif verify and local_hash and getattr(metadata, "content_hash", None):
+                    if metadata.content_hash != local_hash:
+                        last_error = "Content hash mismatch after upload"
+                        logger.warning("%s — retry %d/%d", last_error, attempt, max_retries)
+                    else:
+                        return {
+                            "success": True,
+                            "dropbox_path": dropbox_path,
+                            "size": metadata.size,
+                            "name": metadata.name,
+                            "verified": True,
+                        }
+                else:
+                    # Size matched and hash verification unavailable/disabled
+                    return {
+                        "success": True,
+                        "dropbox_path": dropbox_path,
+                        "size": metadata.size,
+                        "name": metadata.name,
+                        "verified": False,
+                    }
+            except dropbox.exceptions.ApiError as e:
+                last_error = f"Dropbox API error: {e}"
+                logger.warning("%s — retry %d/%d", last_error, attempt, max_retries)
+            except Exception as e:
+                last_error = f"{type(e).__name__}: {e}"
+                logger.warning("%s — retry %d/%d", last_error, attempt, max_retries)
+
+            # Exponential backoff with jitter
+            if attempt < max_retries:
+                delay = min(2 ** attempt, 30) + (time.time() % 1)
+                time.sleep(delay)
+
+        return {
+            "success": False,
+            "error": last_error or "Upload failed for unknown reason",
+            "local_path": local_path,
+            "dropbox_path": dropbox_path,
+        }
+
+    def upload_folder(
+        self,
+        local_dir: str,
+        dropbox_folder: str,
+        extensions: Optional[List[str]] = None,
+        *,
+        max_retries: int = 5,
+        verify: bool = True,
+    ) -> Dict:
+        """Upload every file in ``local_dir`` to ``dropbox_folder``.
+
+        Creates intermediate Dropbox folders as needed. Each file is uploaded
+        with retry + content-hash verification (see :meth:`upload_file`).
+        """
+        dropbox_folder = normalize_dropbox_folder(dropbox_folder)
+
         results = {
-            'success': True,
-            'uploaded': [],
-            'failed': [],
-            'skipped': []
+            "success": True,
+            "uploaded": [],
+            "failed": [],
+            "skipped": [],
+            "destination": dropbox_folder,
         }
 
         try:
-            # Ensure the destination folder exists in Dropbox
-            try:
-                self.dbx.files_create_folder_v2(dropbox_folder)
-            except dropbox.exceptions.ApiError as e:
-                # Folder may already exist, which is fine
-                if not 'path/conflict/folder' in str(e):
-                    raise
+            self.ensure_folder(dropbox_folder)
 
-            # Upload each file in the local directory
             local_path_obj = Path(local_dir)
-            for file_path in local_path_obj.iterdir():
-                if file_path.is_file():
-                    # Check if file matches extension filter
-                    if extensions and not any(file_path.name.lower().endswith(ext.lower()) for ext in extensions):
-                        results['skipped'].append(file_path.name)
-                        continue
+            if not local_path_obj.exists():
+                results["success"] = False
+                results["error"] = f"Local directory not found: {local_dir}"
+                return results
 
-                    # Upload file
-                    dropbox_file_path = f"{dropbox_folder}/{file_path.name}"
-                    upload_result = self.upload_file(str(file_path), dropbox_file_path)
+            for file_path in sorted(local_path_obj.iterdir()):
+                if not file_path.is_file():
+                    continue
+                if extensions and not any(
+                    file_path.name.lower().endswith(ext.lower()) for ext in extensions
+                ):
+                    results["skipped"].append(file_path.name)
+                    continue
 
-                    if upload_result['success']:
-                        results['uploaded'].append(upload_result)
-                    else:
-                        results['failed'].append(upload_result)
-                        results['success'] = False
+                dropbox_file_path = f"{dropbox_folder}/{file_path.name}"
+                upload_result = self.upload_file(
+                    str(file_path),
+                    dropbox_file_path,
+                    max_retries=max_retries,
+                    verify=verify,
+                )
+                if upload_result["success"]:
+                    results["uploaded"].append(upload_result)
+                else:
+                    results["failed"].append(upload_result)
+                    results["success"] = False
 
         except Exception as e:
-            results['success'] = False
-            results['error'] = str(e)
+            results["success"] = False
+            results["error"] = str(e)
 
         return results

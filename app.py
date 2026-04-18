@@ -1,365 +1,434 @@
-"""Streamlit web app for Medical Chronology Pipeline."""
+"""Streamlit UI for the resumable Medical Chronology Pipeline."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional
 
 import streamlit as st
-import asyncio
-import os
-from pathlib import Path
-from datetime import datetime
 from dotenv import load_dotenv
-from src.pipeline import MedicalChronologyPipeline
 
-# Load environment variables
+from src.pipeline import DEFAULT_DESTINATION_PREFIX, MedicalChronologyPipeline
+from src.session_state import (
+    PHASE_DOWNLOAD,
+    PHASE_GENERATE,
+    PHASE_HEADER,
+    PHASE_OCR,
+    PHASE_ORDER,
+    PHASE_SUMMARY,
+    PHASE_UPLOAD,
+    STATUS_COMPLETE,
+    STATUS_FAILED,
+    STATUS_IN_PROGRESS,
+    STATUS_PAUSED,
+    SessionState,
+)
+from src.tools.dropbox_tool import normalize_dropbox_folder
+
 load_dotenv()
 
-# Page config
 st.set_page_config(
     page_title="Medical Chronology Generator",
     page_icon="🏥",
-    layout="wide"
+    layout="wide",
 )
 
-# Title
-st.title("🏥 Medical Chronology Generator")
-st.markdown("---")
 
-# Sidebar for configuration
+# ---------------------------------------------------------------- env / keys
+def _env(key: str) -> Optional[str]:
+    v = os.getenv(key, "")
+    v = v.strip() if v else ""
+    return v or None
+
+
+DROPBOX_APP_KEY = _env("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = _env("DROPBOX_APP_SECRET")
+DROPBOX_REFRESH_TOKEN = _env("DROPBOX_REFRESH_TOKEN")
+GOOGLE_CLOUD_API_KEY = _env("GOOGLE_CLOUD_API_KEY")
+ANTHROPIC_API_KEY = _env("ANTHROPIC_API_KEY")
+
+DROPBOX_OAUTH_OK = bool(DROPBOX_APP_KEY and DROPBOX_APP_SECRET and DROPBOX_REFRESH_TOKEN)
+
+
+# ------------------------------------------------------------ pipeline cache
+@st.cache_resource(show_spinner=False)
+def get_pipeline(google_api_key: str, anthropic_api_key: str) -> MedicalChronologyPipeline:
+    return MedicalChronologyPipeline(
+        google_api_key=google_api_key,
+        anthropic_api_key=anthropic_api_key,
+        dropbox_token=DROPBOX_REFRESH_TOKEN,
+    )
+
+
+# --------------------------------------------------------------- UI helpers
+PHASE_LABELS = {
+    PHASE_DOWNLOAD: "1. Download",
+    PHASE_OCR: "2. OCR",
+    PHASE_GENERATE: "3. Generate",
+    PHASE_HEADER: "4a. Header",
+    PHASE_SUMMARY: "4b. Summary/Gaps",
+    PHASE_UPLOAD: "5. Upload",
+}
+
+PHASE_STATUS_ICON = {
+    "pending": "⚪",
+    "in_progress": "🟡",
+    "complete": "🟢",
+    "failed": "🔴",
+    "paused": "⏸️",
+}
+
+
+def render_phase_tracker(state: SessionState, container) -> None:
+    cols = container.columns(len(PHASE_ORDER))
+    for col, phase in zip(cols, PHASE_ORDER):
+        p = state.phases.get(phase)
+        status = p.status if p else "pending"
+        icon = PHASE_STATUS_ICON.get(status, "⚪")
+        col.markdown(f"**{icon} {PHASE_LABELS[phase]}**")
+        col.caption(status)
+
+
+def session_badge(status: str) -> str:
+    icons = {
+        STATUS_COMPLETE: "🟢",
+        STATUS_IN_PROGRESS: "🟡",
+        STATUS_PAUSED: "⏸️",
+        STATUS_FAILED: "🔴",
+    }
+    return f"{icons.get(status, '⚪')} {status}"
+
+
+def recent_destinations(pipeline: MedicalChronologyPipeline, limit: int = 5) -> List[str]:
+    seen: List[str] = []
+    for s in pipeline.list_sessions():
+        dest = s.destination_folder
+        if dest and dest not in seen:
+            seen.append(dest)
+        if len(seen) >= limit:
+            break
+    return seen
+
+
+def _render_completed_session(
+    pipeline: MedicalChronologyPipeline, state: SessionState
+) -> None:
+    """Show output tabs, download buttons, and re-upload controls."""
+    st.markdown("### 📄 Generated files")
+    out_dir = Path(pipeline.store.output_dir(state.session_id))
+    files = sorted([p for p in out_dir.iterdir() if p.is_file()])
+    if not files:
+        st.warning("No output files found.")
+        return
+
+    tabs = st.tabs([p.name for p in files])
+    for tab, p in zip(tabs, files):
+        with tab:
+            content = p.read_text(encoding="utf-8")
+            if p.suffix == ".json":
+                try:
+                    st.json(json.loads(content))
+                except json.JSONDecodeError:
+                    st.code(content, language="json")
+            else:
+                st.markdown(content)
+            st.download_button(
+                label=f"⬇️ Download {p.name}",
+                data=content,
+                file_name=p.name,
+                mime="application/json" if p.suffix == ".json" else "text/markdown",
+                key=f"dl_{state.session_id}_{p.name}",
+            )
+
+    st.markdown("### 📤 Re-upload to Dropbox")
+    st.caption(f"Last uploaded to `{state.destination_folder}`")
+    recents = recent_destinations(pipeline)
+    with st.form(f"reupload_{state.session_id}"):
+        new_dest = st.text_input(
+            "New Dropbox destination folder",
+            value=state.destination_folder,
+            help="Must start with '/'.",
+        )
+        if recents:
+            picked = st.selectbox(
+                "…or pick a recent folder", options=["(keep above)"] + recents
+            )
+            if picked != "(keep above)":
+                new_dest = picked
+        submitted = st.form_submit_button("🔄 Re-upload now")
+    if submitted:
+        if not new_dest:
+            st.error("Destination is required.")
+        else:
+            pipeline.update_destination(state.session_id, new_dest)
+            status_box = st.status(f"Uploading to {new_dest}…", expanded=True)
+
+            def _cb(msg: str) -> None:
+                status_box.write(msg)
+
+            result = asyncio.run(
+                pipeline.run(state.session_id, progress_callback=_cb)
+            )
+            if result["status"] == "complete":
+                status_box.update(label="✅ Uploaded and verified", state="complete")
+                st.rerun()
+            else:
+                status_box.update(label="❌ Upload failed", state="error")
+                st.error(result.get("error", "See logs."))
+
+
+# -------------------------------------------------------------------- sidebar
 with st.sidebar:
     st.header("⚙️ Configuration")
 
-    # Check API keys and sanitize (remove whitespace that breaks HTTP headers)
-    dropbox_app_key = os.getenv('DROPBOX_APP_KEY', '').strip() or None
-    dropbox_app_secret = os.getenv('DROPBOX_APP_SECRET', '').strip() or None
-    dropbox_refresh_token = os.getenv('DROPBOX_REFRESH_TOKEN', '').strip() or None
-    google_api_key = os.getenv('GOOGLE_CLOUD_API_KEY', '').strip() or None
-    anthropic_api_key = os.getenv('ANTHROPIC_API_KEY', '').strip() or None
-
-    # Check if Dropbox OAuth is configured
-    if dropbox_app_key and dropbox_app_secret and dropbox_refresh_token:
+    if DROPBOX_OAUTH_OK:
         st.success("✅ Dropbox OAuth configured")
-        dropbox_configured = True
     else:
         st.error("❌ Dropbox OAuth not configured")
         st.info("Run: `python setup_dropbox_oauth.py`")
-        dropbox_configured = False
 
-    if google_api_key:
+    google_key_input: Optional[str] = GOOGLE_CLOUD_API_KEY
+    if GOOGLE_CLOUD_API_KEY:
         st.success("✅ Google Vision API key loaded")
     else:
         st.error("❌ Google Vision API key missing")
-        google_api_key = st.text_input("Google Cloud API Key", type="password")
+        google_key_input = st.text_input("Google Cloud API Key", type="password")
 
-    if anthropic_api_key:
+    anthropic_key_input: Optional[str] = ANTHROPIC_API_KEY
+    if ANTHROPIC_API_KEY:
         st.success("✅ Anthropic API key loaded")
     else:
         st.error("❌ Anthropic API key missing")
-        anthropic_api_key = st.text_input("Anthropic API Key", type="password")
+        anthropic_key_input = st.text_input("Anthropic API Key", type="password")
 
     st.markdown("---")
-    st.markdown("### 📖 How it works")
-    st.markdown("""
-    1. Click "Open Dropbox" button
-    2. Navigate to patient folder in Dropbox
-    3. Copy URL from browser address bar
-    4. Paste URL into input field
-    5. Enter patient identifier
-    6. Click 'Generate Chronology'
-    7. Download results
-    """)
-
-# Main content
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    st.header("📋 Input")
-
-    # Dropbox link input
-    dropbox_link = st.text_input(
-        "Dropbox Folder URL or Path",
-        placeholder="Paste URL from browser address bar or use /folder/path format",
-        help="Click 'Open Dropbox' below, navigate to folder, then copy the URL from your browser's address bar"
+    st.markdown("### 📖 Workflow")
+    st.markdown(
+        "1. Paste a Dropbox shared link to a patient folder.\n"
+        "2. Choose where on Dropbox the outputs go.\n"
+        "3. Start the run. Close the tab at any time — progress is saved.\n"
+        "4. Come back to **Sessions** to resume, re-upload, or download."
     )
 
-    # Open Dropbox button
-    st.link_button(
-        "📂 Open Dropbox",
-        "https://www.dropbox.com/home",
-        help="Click to open Dropbox, navigate to the patient folder, then copy the URL from your browser"
-    )
 
-    # Patient ID input
-    patient_id = st.text_input(
-        "Patient ID",
-        placeholder="e.g., john_doe",
-        help="Unique identifier for the patient (used for organizing files)"
-    )
+# Short-circuit: require the essentials
+KEYS_OK = bool(DROPBOX_OAUTH_OK and google_key_input and anthropic_key_input)
+if not KEYS_OK:
+    st.warning("Configure the API keys in the sidebar (or your `.env`) to continue.")
+    st.stop()
 
-    # Generate button
-    generate_btn = st.button("🚀 Generate Chronology", type="primary", use_container_width=True)
+pipeline = get_pipeline(google_key_input, anthropic_key_input)
 
-with col2:
-    st.header("📊 Status")
-    status_container = st.container()
+# Top-level session routing via ?session_id= query param (makes resume links shareable)
+# (Use st.query_params where available; fall back gracefully.)
+try:
+    qp = st.query_params  # type: ignore[attr-defined]
+    active_session_id: Optional[str] = qp.get("session_id")
+except Exception:
+    active_session_id = None
 
-# Results section
-st.markdown("---")
-results_header = st.empty()
-results_container = st.container()
 
-# Initialize session state for storing results
-if 'pipeline_result' not in st.session_state:
-    st.session_state.pipeline_result = None
-if 'pipeline_keys' not in st.session_state:
-    st.session_state.pipeline_keys = None
+tab_new, tab_sessions = st.tabs(["🚀 New Run", "📚 Sessions"])
 
-# Process pipeline
-if generate_btn:
-    if not dropbox_configured:
-        st.error("❌ Dropbox OAuth not configured. Run: python setup_dropbox_oauth.py")
-    elif not google_api_key:
-        st.error("❌ Google Vision API key missing")
-    elif not anthropic_api_key:
-        st.error("❌ Anthropic API key missing")
-    elif not dropbox_link:
-        st.error("❌ Please provide a Dropbox shared link")
-    elif not patient_id:
-        st.error("❌ Please provide a patient ID")
-    else:
-        # Initialize pipeline (OAuth credentials loaded from .env automatically)
-        pipeline = MedicalChronologyPipeline(
-            dropbox_token=dropbox_refresh_token,
-            google_api_key=google_api_key,
-            anthropic_api_key=anthropic_api_key
+
+# ---------------------------------------------------------------- NEW RUN tab
+with tab_new:
+    st.header("Start a new chronology")
+
+    col_left, col_right = st.columns([2, 1])
+    with col_left:
+        dropbox_link = st.text_input(
+            "Dropbox folder shared link",
+            placeholder="https://www.dropbox.com/scl/fo/...",
+            help="Right-click the patient folder in Dropbox → Share → Create link.",
+        )
+        st.link_button("📂 Open Dropbox", "https://www.dropbox.com/home")
+
+        patient_id = st.text_input(
+            "Patient ID",
+            placeholder="e.g. john_doe",
+            help="Used to prefix the session folder and Dropbox destination.",
         )
 
-        # Status updates
-        with status_container:
-            status = st.status("🔄 Running pipeline...", expanded=True)
-            progress_placeholder = st.empty()
-
-        try:
-            # Real-time progress callback
-            def update_progress(message: str):
-                with progress_placeholder:
-                    st.info(message)
-
-            # Run pipeline with progress updates
-            async def run():
-                return await pipeline.run_pipeline(dropbox_link, patient_id, progress_callback=update_progress)
-
-            result = asyncio.run(run())
-
-            # Store result and API keys in session state for quality check
-            if result['success']:
-                st.session_state.pipeline_result = result
-                st.session_state.pipeline_keys = {
-                    'dropbox_token': dropbox_refresh_token,
-                    'google_api_key': google_api_key,
-                    'anthropic_api_key': anthropic_api_key
-                }
-
-            if result['success']:
-                status.update(label="✅ Pipeline completed successfully!", state="complete")
-                progress_placeholder.empty()  # Clear progress messages
-
-                # Show results
-                results_header.header("📄 Generated Files")
-
-                with results_container:
-                    # Create tabs for each output file
-                    if result['output_files']:
-                        tabs = st.tabs(list(result['output_files'].keys()))
-
-                        for tab, (filename, filepath) in zip(tabs, result['output_files'].items()):
-                            with tab:
-                                # Read file content
-                                with open(filepath, 'r', encoding='utf-8') as f:
-                                    content = f.read()
-
-                                # Display preview
-                                if filename.endswith('.json'):
-                                    st.json(content)
-                                else:
-                                    st.markdown(content)
-
-                                # Download button
-                                st.download_button(
-                                    label=f"⬇️ Download {filename}",
-                                    data=content,
-                                    file_name=filename,
-                                    mime="application/json" if filename.endswith('.json') else "text/markdown"
-                                )
-
-                        # Summary info
-                        dropbox_info = ""
-                        if result.get('dropbox_upload', {}).get('success'):
-                            dropbox_info = f"\n                        - **Dropbox:** ✅ Uploaded to `{result.get('dropbox_path')}`"
-                        
-                        st.success(f"""
-                        ### 🎉 Success!
-                        - **Session ID:** {result['session_id']}
-                        - **Files Processed:** {result['files_processed']}
-                        - **Output Directory:** `{result['output_dir']}`{dropbox_info}
-                        """)
-
-                        if result['missing_files']:
-                            st.warning(f"⚠️ Missing files: {', '.join(result['missing_files'])}")
-
-                        # Quality check button
-                        st.markdown("---")
-                        st.subheader("🔍 Quality Verification")
-                        st.info("Check for hallucinations or inaccuracies in the generated chronology against source documents.")
-
-                        if st.button("🚀 Run Quality Check", type="secondary"):
-                            verification_status = st.status("🔍 Verifying chronology...", expanded=True)
-                            verification_progress = st.empty()
-
-                            def verification_callback(msg: str):
-                                with verification_progress:
-                                    st.info(msg)
-
-                            # Run verification
-                            chronology_path = result['output_files'].get('chronology.md')
-                            if chronology_path:
-                                verification_result = pipeline.chronology_agent.verify_chronology(
-                                    chronology_path=chronology_path,
-                                    extracted_dir=result['extracted_dir'],
-                                    progress_callback=verification_callback
-                                )
-
-                                if verification_result['success']:
-                                    verification_status.update(label="✅ Verification complete!", state="complete")
-                                    verification_progress.empty()
-
-                                    st.markdown("### 📋 Verification Report")
-                                    st.markdown(verification_result['verification'])
-
-                                    st.info(f"Analyzed against {verification_result['documents_checked']} source documents")
-                                else:
-                                    verification_status.update(label="❌ Verification failed", state="error")
-                                    st.error(f"Error: {verification_result.get('error')}")
-                            else:
-                                st.error("Chronology file not found")
-
-                    else:
-                        st.warning("No output files were generated")
-
-            else:
-                status.update(label="❌ Pipeline failed", state="error")
-                st.error(f"Error: {result.get('error', 'Unknown error')}")
-
-                with st.expander("📁 Session Information"):
-                    st.json({
-                        'session_id': result.get('session_id'),
-                        'input_dir': result.get('input_dir'),
-                        'extracted_dir': result.get('extracted_dir'),
-                        'output_dir': result.get('output_dir')
-                    })
-
-        except Exception as e:
-            status.update(label="❌ Pipeline failed", state="error")
-            st.error(f"Unexpected error: {str(e)}")
-            st.exception(e)
-
-# Display stored results from session state (for quality check persistence)
-elif st.session_state.pipeline_result is not None:
-    result = st.session_state.pipeline_result
-
-    # Show results header
-    results_header.header("📄 Generated Files")
-
-    with results_container:
-        # Create tabs for each output file
-        if result['output_files']:
-            tabs = st.tabs(list(result['output_files'].keys()))
-
-            for tab, (filename, filepath) in zip(tabs, result['output_files'].items()):
-                with tab:
-                    # Read file content
-                    with open(filepath, 'r', encoding='utf-8') as f:
-                        content = f.read()
-
-                    # Display preview
-                    if filename.endswith('.json'):
-                        st.json(content)
-                    else:
-                        st.markdown(content)
-
-                    # Download button
-                    st.download_button(
-                        label=f"⬇️ Download {filename}",
-                        data=content,
-                        file_name=filename,
-                        mime="application/json" if filename.endswith('.json') else "text/markdown"
-                    )
-
-            # Summary info
-            dropbox_info = ""
-            if result.get('dropbox_upload', {}).get('success'):
-                dropbox_info = f"\n            - **Dropbox:** ✅ Uploaded to `{result.get('dropbox_path')}`"
-            
-            st.success(f"""
-            ### 🎉 Success!
-            - **Session ID:** {result['session_id']}
-            - **Files Processed:** {result['files_processed']}
-            - **Output Directory:** `{result['output_dir']}`{dropbox_info}
-            """)
-
-            if result['missing_files']:
-                st.warning(f"⚠️ Missing files: {', '.join(result['missing_files'])}")
-
-            # Quality check button
-            st.markdown("---")
-            st.subheader("🔍 Quality Verification")
-            st.info("Check for hallucinations or inaccuracies in the generated chronology against source documents.")
-
-            if st.button("🚀 Run Quality Check", type="secondary"):
-                # Reinitialize pipeline with stored API keys
-                if st.session_state.pipeline_keys:
-                    keys = st.session_state.pipeline_keys
-                    pipeline = MedicalChronologyPipeline(
-                        dropbox_token=keys.get('dropbox_token'),
-                        google_api_key=keys['google_api_key'],
-                        anthropic_api_key=keys['anthropic_api_key']
-                    )
-
-                    verification_status = st.status("🔍 Verifying chronology...", expanded=True)
-                    verification_progress = st.empty()
-
-                    def verification_callback(msg: str):
-                        with verification_progress:
-                            st.info(msg)
-
-                    # Run verification
-                    chronology_path = result['output_files'].get('chronology.md')
-                    if chronology_path:
-                        verification_result = pipeline.chronology_agent.verify_chronology(
-                            chronology_path=chronology_path,
-                            extracted_dir=result['extracted_dir'],
-                            progress_callback=verification_callback
-                        )
-
-                        if verification_result['success']:
-                            verification_status.update(label="✅ Verification complete!", state="complete")
-                            verification_progress.empty()
-
-                            st.markdown("### 📋 Verification Report")
-                            st.markdown(verification_result['verification'])
-
-                            st.info(f"Analyzed against {verification_result['documents_checked']} source documents")
-                        else:
-                            verification_status.update(label="❌ Verification failed", state="error")
-                            st.error(f"Error: {verification_result.get('error')}")
-                    else:
-                        st.error("Chronology file not found")
-                else:
-                    st.error("API keys not found in session state. Please regenerate the chronology.")
+    with col_right:
+        st.markdown("### Output destination")
+        recents = recent_destinations(pipeline)
+        default_dest = (
+            f"{DEFAULT_DESTINATION_PREFIX}/{patient_id}" if patient_id else DEFAULT_DESTINATION_PREFIX
+        )
+        dest_choice = st.radio(
+            "Where should outputs go?",
+            options=["Default", "Recent folder", "Custom"],
+            index=0,
+            horizontal=True,
+        )
+        if dest_choice == "Default":
+            destination = default_dest
+            st.caption(f"→ `{destination}/<session_id>`")
+        elif dest_choice == "Recent folder" and recents:
+            destination = st.selectbox("Recent folders", recents)
+        elif dest_choice == "Recent folder":
+            st.info("No recent folders yet — use Default or Custom.")
+            destination = default_dest
         else:
-            st.warning("No output files were generated")
+            destination = st.text_input(
+                "Custom Dropbox folder",
+                value=default_dest,
+                help="Must be a Dropbox path starting with '/'.",
+            )
+        destination = normalize_dropbox_folder(destination) if destination else default_dest
 
-# Footer
+    st.markdown("---")
+    start = st.button("🚀 Start chronology run", type="primary", use_container_width=True)
+
+    if start:
+        if not dropbox_link:
+            st.error("Provide a Dropbox shared link.")
+        elif not patient_id:
+            st.error("Provide a patient ID.")
+        else:
+            # If destination was left at the prefix, append session-level folder
+            final_destination = destination
+            if final_destination == DEFAULT_DESTINATION_PREFIX or final_destination == default_dest:
+                # let the pipeline default handle it (session_id suffix)
+                final_destination = None
+            state = pipeline.create_session(
+                dropbox_link=dropbox_link,
+                patient_id=patient_id,
+                destination_folder=final_destination,
+            )
+            st.session_state["active_session_id"] = state.session_id
+            st.success(f"Session created: `{state.session_id}`")
+            st.rerun()
+
+    # If a session is active in this browser, show its live run panel
+    live_sid = st.session_state.get("active_session_id") or active_session_id
+    if live_sid:
+        try:
+            state = pipeline.load_session(live_sid)
+        except FileNotFoundError:
+            st.session_state.pop("active_session_id", None)
+            state = None
+
+        if state is not None:
+            st.markdown("---")
+            st.subheader(f"Current session: `{state.session_id}`")
+            st.caption(
+                f"Status: {session_badge(state.status)}  •  "
+                f"Destination: `{state.destination_folder}`"
+            )
+            tracker = st.container()
+            render_phase_tracker(state, tracker)
+
+            col_run, col_pause = st.columns(2)
+            with col_run:
+                run_now = st.button(
+                    "▶️ Run / Resume",
+                    key=f"run_{state.session_id}",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=state.status == STATUS_COMPLETE,
+                )
+            with col_pause:
+                pause_now = st.button(
+                    "⏸ Pause (safe stop)",
+                    key=f"pause_{state.session_id}",
+                    use_container_width=True,
+                    help="Writes a PAUSE marker; the pipeline stops cleanly at its next checkpoint.",
+                    disabled=state.status not in (STATUS_IN_PROGRESS,),
+                )
+
+            if pause_now:
+                pipeline.request_pause(state.session_id)
+                st.info(
+                    "Pause requested. The run will stop at the next safe checkpoint. "
+                    "You can also just close this tab — progress is checkpointed."
+                )
+
+            if run_now:
+                status_box = st.status("Running pipeline…", expanded=True)
+                progress_lines: List[str] = []
+
+                def _cb(msg: str) -> None:
+                    progress_lines.append(msg)
+                    status_box.write(msg)
+
+                result = asyncio.run(pipeline.run(state.session_id, progress_callback=_cb))
+
+                if result["status"] == "complete":
+                    status_box.update(label="✅ Pipeline complete", state="complete")
+                elif result["status"] == "paused":
+                    status_box.update(label="⏸ Paused — you can resume anytime", state="running")
+                else:
+                    status_box.update(label="❌ Pipeline failed", state="error")
+                    st.error(result.get("error", "Unknown error"))
+
+                # Refresh UI with latest state
+                st.rerun()
+
+            # If completed, show outputs + re-upload
+            if state.status == STATUS_COMPLETE:
+                _render_completed_session(pipeline, state)
+
+
+# -------------------------------------------------------------- SESSIONS tab
+with tab_sessions:
+    st.header("Sessions")
+    st.caption("Every run is resumable. Close this tab anytime — work is checkpointed to disk.")
+
+    sessions = pipeline.list_sessions()
+    if not sessions:
+        st.info("No sessions yet. Start one from the **New Run** tab.")
+    else:
+        for s in sessions:
+            with st.expander(
+                f"{session_badge(s.status)}  **{s.session_id}**  "
+                f"•  patient: `{s.patient_id or '—'}`  •  updated {s.updated_at}",
+                expanded=(s.status in (STATUS_IN_PROGRESS, STATUS_PAUSED, STATUS_FAILED)),
+            ):
+                st.caption(f"Destination: `{s.destination_folder}`")
+                render_phase_tracker(s, st.container())
+
+                if s.last_error:
+                    st.error(s.last_error)
+
+                col_open, col_resume, col_pause, col_del = st.columns(4)
+                with col_open:
+                    if st.button("👁️ Open", key=f"open_{s.session_id}"):
+                        st.session_state["active_session_id"] = s.session_id
+                        st.rerun()
+                with col_resume:
+                    if st.button(
+                        "▶️ Run / Resume",
+                        key=f"resume_{s.session_id}",
+                        disabled=s.status == STATUS_COMPLETE,
+                    ):
+                        st.session_state["active_session_id"] = s.session_id
+                        st.rerun()
+                with col_pause:
+                    if st.button(
+                        "⏸ Pause",
+                        key=f"pausebtn_{s.session_id}",
+                        disabled=s.status != STATUS_IN_PROGRESS,
+                    ):
+                        pipeline.request_pause(s.session_id)
+                        st.toast("Pause requested")
+                with col_del:
+                    if st.button(
+                        "🗑️ Delete",
+                        key=f"del_{s.session_id}",
+                        help="Removes local session files. Does NOT delete Dropbox outputs.",
+                    ):
+                        pipeline.store.delete(s.session_id)
+                        st.rerun()
+
+                if s.status == STATUS_COMPLETE:
+                    _render_completed_session(pipeline, s)
+
+
 st.markdown("---")
-st.markdown("""
-<div style='text-align: center; color: #666; font-size: 0.9em;'>
-    <p>Medical Chronology Pipeline v1.0 | Powered by Claude Agent SDK</p>
-</div>
-""", unsafe_allow_html=True)
+st.caption("Medical Chronology Pipeline v2 — pause, resume, reliable upload")

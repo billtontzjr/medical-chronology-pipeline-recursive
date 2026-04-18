@@ -1,0 +1,272 @@
+"""Persistent session state for resumable pipeline runs.
+
+Each session owns a directory under ``data/sessions/<session_id>/`` containing
+``state.json``. The state records which phases have completed so the pipeline
+can skip already-finished work on resume.
+
+A ``PAUSE`` file in the same directory is a cooperative pause signal — the
+pipeline checks for it between phases and at safe checkpoints and exits
+cleanly if present. Deleting the file and running the pipeline again resumes.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional
+
+
+PHASE_DOWNLOAD = "download"
+PHASE_OCR = "ocr"
+PHASE_GENERATE = "generate"
+PHASE_HEADER = "header"
+PHASE_SUMMARY = "summary"
+PHASE_UPLOAD = "upload"
+
+PHASE_ORDER = [
+    PHASE_DOWNLOAD,
+    PHASE_OCR,
+    PHASE_GENERATE,
+    PHASE_HEADER,
+    PHASE_SUMMARY,
+    PHASE_UPLOAD,
+]
+
+STATUS_PENDING = "pending"
+STATUS_IN_PROGRESS = "in_progress"
+STATUS_COMPLETE = "complete"
+STATUS_FAILED = "failed"
+STATUS_PAUSED = "paused"
+
+
+@dataclass
+class PhaseState:
+    status: str = STATUS_PENDING
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    error: Optional[str] = None
+    # Free-form per-phase data (e.g. list of completed files, batch count)
+    data: Dict = field(default_factory=dict)
+
+
+@dataclass
+class SessionState:
+    session_id: str
+    patient_id: str
+    dropbox_link: str
+    destination_folder: str
+    created_at: str
+    updated_at: str
+    status: str = STATUS_IN_PROGRESS
+    last_error: Optional[str] = None
+    phases: Dict[str, PhaseState] = field(default_factory=dict)
+
+    @classmethod
+    def new(
+        cls,
+        session_id: str,
+        patient_id: str,
+        dropbox_link: str,
+        destination_folder: str,
+    ) -> "SessionState":
+        now = datetime.now().isoformat(timespec="seconds")
+        return cls(
+            session_id=session_id,
+            patient_id=patient_id,
+            dropbox_link=dropbox_link,
+            destination_folder=destination_folder,
+            created_at=now,
+            updated_at=now,
+            phases={p: PhaseState() for p in PHASE_ORDER},
+        )
+
+    def to_dict(self) -> Dict:
+        return {
+            "session_id": self.session_id,
+            "patient_id": self.patient_id,
+            "dropbox_link": self.dropbox_link,
+            "destination_folder": self.destination_folder,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "status": self.status,
+            "last_error": self.last_error,
+            "phases": {k: asdict(v) for k, v in self.phases.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict) -> "SessionState":
+        phases = {k: PhaseState(**v) for k, v in d.get("phases", {}).items()}
+        # Ensure all known phases exist (forward-compat)
+        for p in PHASE_ORDER:
+            phases.setdefault(p, PhaseState())
+        return cls(
+            session_id=d["session_id"],
+            patient_id=d.get("patient_id", ""),
+            dropbox_link=d.get("dropbox_link", ""),
+            destination_folder=d.get("destination_folder", ""),
+            created_at=d.get("created_at", datetime.now().isoformat(timespec="seconds")),
+            updated_at=d.get("updated_at", datetime.now().isoformat(timespec="seconds")),
+            status=d.get("status", STATUS_IN_PROGRESS),
+            last_error=d.get("last_error"),
+            phases=phases,
+        )
+
+
+class SessionStore:
+    """File-backed session store.
+
+    Layout::
+
+        base_dir/
+          data/
+            sessions/
+              <session_id>/
+                state.json
+                PAUSE            (optional marker file)
+                batches/         (per-batch output files)
+                input/           (downloaded PDFs)
+                extracted/       (OCR text)
+                output/          (final chronology.md, summary.md, etc.)
+    """
+
+    def __init__(self, base_dir: str):
+        self.base_dir = Path(base_dir)
+        self.sessions_root = self.base_dir / "data" / "sessions"
+        self.sessions_root.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------ paths
+    def session_dir(self, session_id: str) -> Path:
+        d = self.sessions_root / session_id
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def state_path(self, session_id: str) -> Path:
+        return self.session_dir(session_id) / "state.json"
+
+    def pause_path(self, session_id: str) -> Path:
+        return self.session_dir(session_id) / "PAUSE"
+
+    def input_dir(self, session_id: str) -> Path:
+        d = self.session_dir(session_id) / "input"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def extracted_dir(self, session_id: str) -> Path:
+        d = self.session_dir(session_id) / "extracted"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def output_dir(self, session_id: str) -> Path:
+        d = self.session_dir(session_id) / "output"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def batches_dir(self, session_id: str) -> Path:
+        d = self.session_dir(session_id) / "batches"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    # ------------------------------------------------------------------- crud
+    def create(
+        self,
+        session_id: str,
+        patient_id: str,
+        dropbox_link: str,
+        destination_folder: str,
+    ) -> SessionState:
+        state = SessionState.new(session_id, patient_id, dropbox_link, destination_folder)
+        self.save(state)
+        return state
+
+    def exists(self, session_id: str) -> bool:
+        return self.state_path(session_id).exists()
+
+    def load(self, session_id: str) -> SessionState:
+        path = self.state_path(session_id)
+        if not path.exists():
+            raise FileNotFoundError(f"No session state at {path}")
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return SessionState.from_dict(data)
+
+    def save(self, state: SessionState) -> None:
+        state.updated_at = datetime.now().isoformat(timespec="seconds")
+        path = self.state_path(state.session_id)
+        tmp = path.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state.to_dict(), f, indent=2)
+        os.replace(tmp, path)  # atomic on POSIX
+
+    def list_sessions(self) -> List[SessionState]:
+        sessions = []
+        for child in sorted(self.sessions_root.iterdir(), reverse=True):
+            if not child.is_dir():
+                continue
+            if not (child / "state.json").exists():
+                continue
+            try:
+                sessions.append(self.load(child.name))
+            except Exception:
+                continue
+        return sessions
+
+    def delete(self, session_id: str) -> None:
+        import shutil
+        d = self.sessions_root / session_id
+        if d.exists():
+            shutil.rmtree(d)
+
+    # ---------------------------------------------------------------- phases
+    def mark_phase(
+        self,
+        state: SessionState,
+        phase: str,
+        status: str,
+        *,
+        error: Optional[str] = None,
+        data: Optional[Dict] = None,
+    ) -> None:
+        now = datetime.now().isoformat(timespec="seconds")
+        p = state.phases.setdefault(phase, PhaseState())
+        p.status = status
+        if status == STATUS_IN_PROGRESS and not p.started_at:
+            p.started_at = now
+        if status == STATUS_COMPLETE:
+            p.completed_at = now
+        if error is not None:
+            p.error = error
+        if data is not None:
+            p.data.update(data)
+        if status == STATUS_FAILED:
+            state.status = STATUS_FAILED
+            state.last_error = error
+        elif all(
+            state.phases.get(ph, PhaseState()).status == STATUS_COMPLETE
+            for ph in PHASE_ORDER
+        ):
+            state.status = STATUS_COMPLETE
+        self.save(state)
+
+    def update_phase_data(self, state: SessionState, phase: str, data: Dict) -> None:
+        p = state.phases.setdefault(phase, PhaseState())
+        p.data.update(data)
+        self.save(state)
+
+    # ----------------------------------------------------------------- pause
+    def request_pause(self, session_id: str) -> None:
+        self.pause_path(session_id).write_text(datetime.now().isoformat(timespec="seconds"))
+
+    def clear_pause(self, session_id: str) -> None:
+        p = self.pause_path(session_id)
+        if p.exists():
+            p.unlink()
+
+    def pause_requested(self, session_id: str) -> bool:
+        return self.pause_path(session_id).exists()
+
+
+class PauseRequested(Exception):
+    """Raised inside the pipeline when a cooperative pause is detected."""
