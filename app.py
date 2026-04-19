@@ -61,12 +61,26 @@ DROPBOX_OAUTH_OK = bool(DROPBOX_APP_KEY and DROPBOX_APP_SECRET and DROPBOX_REFRE
 
 
 # ------------------------------------------------------------ pipeline cache
+# User-facing model options. The key is what appears in the selectbox; the
+# value is the model ID sent to the Anthropic API.
+MODEL_OPTIONS = {
+    "Sonnet 4.6 — recommended (balanced quality & cost)": "claude-sonnet-4-6",
+    "Sonnet 4.5 — tested baseline (fallback)": "claude-sonnet-4-5-20250929",
+    "Opus 4.7 — highest quality (≈5× more expensive)": "claude-opus-4-7",
+    "Haiku 4.5 — fastest and cheapest (lower quality)": "claude-haiku-4-5-20251001",
+}
+DEFAULT_MODEL_LABEL = "Sonnet 4.6 — recommended (balanced quality & cost)"
+
+
 @st.cache_resource(show_spinner=False)
-def get_pipeline(google_api_key: str, anthropic_api_key: str) -> MedicalChronologyPipeline:
+def get_pipeline(
+    google_api_key: str, anthropic_api_key: str, model_id: str
+) -> MedicalChronologyPipeline:
     return MedicalChronologyPipeline(
         google_api_key=google_api_key,
         anthropic_api_key=anthropic_api_key,
         dropbox_token=DROPBOX_REFRESH_TOKEN,
+        model=model_id,
     )
 
 
@@ -211,6 +225,28 @@ with st.sidebar:
         st.error("❌ Anthropic API key missing")
         anthropic_key_input = st.text_input("Anthropic API Key", type="password")
 
+    st.markdown("### 🧠 Claude model")
+    env_default_model = os.getenv("ANTHROPIC_MODEL", "").strip()
+    # If an env var pins the model, keep that selection locked in.
+    if env_default_model:
+        # Try to find a matching UI label; otherwise keep the raw model ID.
+        env_label = next(
+            (k for k, v in MODEL_OPTIONS.items() if v == env_default_model),
+            f"Env override: {env_default_model}",
+        )
+        st.info(f"Model pinned by `ANTHROPIC_MODEL` env var: {env_default_model}")
+        selected_model_id = env_default_model
+    else:
+        default_idx = list(MODEL_OPTIONS.keys()).index(DEFAULT_MODEL_LABEL)
+        selected_label = st.selectbox(
+            "Model",
+            options=list(MODEL_OPTIONS.keys()),
+            index=default_idx,
+            help="Picking a different model takes effect on the NEXT phase that calls Claude. Already-written batches won't be regenerated.",
+        )
+        selected_model_id = MODEL_OPTIONS[selected_label]
+    st.caption(f"Using: `{selected_model_id}`")
+
     st.markdown("---")
     st.markdown("### 📖 Workflow")
     st.markdown(
@@ -227,7 +263,7 @@ if not KEYS_OK:
     st.warning("Configure the API keys in the sidebar (or your `.env`) to continue.")
     st.stop()
 
-pipeline = get_pipeline(google_key_input, anthropic_key_input)
+pipeline = get_pipeline(google_key_input, anthropic_key_input, selected_model_id)
 
 # Top-level session routing via ?session_id= query param (makes resume links shareable)
 # (Use st.query_params where available; fall back gracefully.)

@@ -19,10 +19,10 @@ except ImportError:
 class ChronologyAgent:
     """Generate medical chronologies using direct Anthropic API calls."""
 
-    # Default model. Pinned to the version this codebase was tested against
-    # so deployments don't break when a newer alias becomes available before
-    # the account has access to it. Override via env var ANTHROPIC_MODEL.
-    DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
+    # Default model. Override per-run via the UI selector, or globally via
+    # the ANTHROPIC_MODEL env var. Sonnet 4.6 is the best non-Opus option
+    # for medical-legal chronology work.
+    DEFAULT_MODEL = "claude-sonnet-4-6"
 
     def __init__(self, api_key: str, model: Optional[str] = None):
         """
