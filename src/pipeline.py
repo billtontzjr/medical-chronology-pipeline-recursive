@@ -310,19 +310,21 @@ class MedicalChronologyPipeline:
     async def _phase_generate(
         self, state: SessionState, cb: Callable[[str], None], session_id: str
     ) -> None:
+        # Claude calls are synchronous (httpx.Client under the hood). Running
+        # them directly in the main thread is the right call under Streamlit:
+        # the script is already blocked on asyncio.run(), and the progress
+        # callback touches Streamlit widgets — which REQUIRE the script run
+        # context (i.e. the main thread). Using asyncio.to_thread here causes
+        # live_slot.empty() to raise streamlit.errors.NoSessionContext.
         extracted_dir = str(self.store.extracted_dir(state.session_id))
         batches_dir = str(self.store.batches_dir(state.session_id))
 
-        # Off the event loop — Claude calls are blocking
-        def _work() -> Dict:
-            return self.chronology_agent.generate_batches(
-                input_dir=extracted_dir,
-                batches_dir=batches_dir,
-                progress_callback=cb,
-                should_pause=lambda: self._should_pause(session_id),
-            )
-
-        result = await asyncio.to_thread(_work)
+        result = self.chronology_agent.generate_batches(
+            input_dir=extracted_dir,
+            batches_dir=batches_dir,
+            progress_callback=cb,
+            should_pause=lambda: self._should_pause(session_id),
+        )
         if not result["success"]:
             raise RuntimeError(result.get("error", "Batch generation failed"))
         self.store.update_phase_data(
@@ -342,15 +344,12 @@ class MedicalChronologyPipeline:
         batches_dir = str(self.store.batches_dir(state.session_id))
         output_dir = str(self.store.output_dir(state.session_id))
 
-        def _work() -> Dict:
-            return self.chronology_agent.assemble_outputs(
-                input_dir=extracted_dir,
-                batches_dir=batches_dir,
-                output_dir=output_dir,
-                progress_callback=cb,
-            )
-
-        result = await asyncio.to_thread(_work)
+        result = self.chronology_agent.assemble_outputs(
+            input_dir=extracted_dir,
+            batches_dir=batches_dir,
+            output_dir=output_dir,
+            progress_callback=cb,
+        )
         if not result["success"]:
             raise RuntimeError(result.get("error", "Assembly failed"))
         self.store.update_phase_data(
@@ -365,15 +364,12 @@ class MedicalChronologyPipeline:
         output_dir = self.store.output_dir(state.session_id)
         destination = normalize_dropbox_folder(state.destination_folder)
 
-        def _work() -> Dict:
-            return self.dropbox_tool.upload_folder(
-                local_dir=str(output_dir),
-                dropbox_folder=destination,
-                max_retries=5,
-                verify=True,
-            )
-
-        result = await asyncio.to_thread(_work)
+        result = self.dropbox_tool.upload_folder(
+            local_dir=str(output_dir),
+            dropbox_folder=destination,
+            max_retries=5,
+            verify=True,
+        )
         if not result["success"]:
             failed_names = [f.get("dropbox_path") for f in result.get("failed", [])]
             raise RuntimeError(
