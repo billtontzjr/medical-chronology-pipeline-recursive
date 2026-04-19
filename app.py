@@ -5,12 +5,18 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
 import streamlit as st
 from dotenv import load_dotenv
+
+
+# Fast-moving progress messages (OCR page-by-page) go to a single slot that
+# updates in place, instead of scrolling a new line for every page.
+LIVE_MSG_PATTERN = re.compile(r"Page\s+\d+\s*/\s*\d+")
 
 from src.pipeline import DEFAULT_DESTINATION_PREFIX, MedicalChronologyPipeline
 from src.session_state import (
@@ -324,6 +330,9 @@ with tab_new:
             tracker = st.container()
             render_phase_tracker(state, tracker)
 
+            if state.last_error:
+                st.error(f"Last error: {state.last_error}")
+
             col_run, col_pause = st.columns(2)
             with col_run:
                 run_now = st.button(
@@ -351,11 +360,19 @@ with tab_new:
 
             if run_now:
                 status_box = st.status("Running pipeline…", expanded=True)
-                progress_lines: List[str] = []
+                # Fast-moving (page-level) messages overwrite a single slot;
+                # everything else appends to the main status log.
+                with status_box:
+                    live_slot = st.empty()
 
                 def _cb(msg: str) -> None:
-                    progress_lines.append(msg)
-                    status_box.write(msg)
+                    if LIVE_MSG_PATTERN.search(msg):
+                        live_slot.write(msg)
+                    else:
+                        # Clear the live slot when we move past that phase,
+                        # then record the milestone in the log.
+                        live_slot.empty()
+                        status_box.write(msg)
 
                 result = asyncio.run(pipeline.run(state.session_id, progress_callback=_cb))
 
