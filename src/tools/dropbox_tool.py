@@ -15,9 +15,45 @@ from dropbox.sharing import SharedLinkMetadata
 logger = logging.getLogger(__name__)
 
 
+def dropbox_url_to_path(value: str) -> str:
+    """Convert a Dropbox browser URL to an API path, or return the input as-is.
+
+    Handles:
+    - Direct API paths: ``/Team Folder/Patients/Darelyn`` → returned unchanged
+    - Home URLs: ``https://www.dropbox.com/home/Team%20Folder/Patients/Darelyn``
+      → ``/Team Folder/Patients/Darelyn``
+    - Shared links (``.../scl/fo/...``) → returned unchanged so callers can
+      still feed them to the shared-link APIs if desired.
+
+    Empty input returns an empty string.
+    """
+    if not value:
+        return ""
+    s = value.strip()
+    if s.startswith("/"):
+        return s
+    if not (s.startswith("http://") or s.startswith("https://")):
+        return s
+    parsed = urlparse(s)
+    # Home URLs look like: https://www.dropbox.com/home/<Top Folder>/<subpath>
+    # where <Top Folder> is a real Dropbox folder (team folder, personal
+    # root folder, etc) — NOT a username. Strip the `/home` prefix and
+    # return everything after, URL-decoded.
+    path = parsed.path.rstrip("/")
+    if path == "/home":
+        return "/"
+    if path.startswith("/home/"):
+        remaining = path[len("/home/"):]
+        return unquote("/" + remaining) if remaining else "/"
+    # Shared links or anything else — return as-is; not usable for direct upload
+    return s
+
+
 def normalize_dropbox_folder(path: str) -> str:
     """Clean a user-provided Dropbox folder path.
 
+    - Runs the input through :func:`dropbox_url_to_path` first so home URLs
+      become paths automatically.
     - Strips surrounding whitespace
     - Ensures a leading ``/``
     - Removes trailing ``/``
@@ -25,7 +61,9 @@ def normalize_dropbox_folder(path: str) -> str:
     """
     if not path:
         return ""
-    p = path.strip()
+    p = dropbox_url_to_path(path).strip()
+    if not p:
+        return ""
     if not p.startswith("/"):
         p = "/" + p
     # Collapse //

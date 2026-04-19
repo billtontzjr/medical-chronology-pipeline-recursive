@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import re
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -154,6 +156,23 @@ def _render_completed_session(
         st.warning("No output files found.")
         return
 
+    # Build an in-memory ZIP so the user can download everything at once
+    # (goes to the browser's Downloads folder — the web equivalent of the
+    # desktop). Built fresh on each render so it always reflects disk state.
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for p in files:
+            zf.writestr(p.name, p.read_text(encoding="utf-8"))
+    zip_buf.seek(0)
+    st.download_button(
+        label="⬇️ Download all as ZIP (to your computer)",
+        data=zip_buf.getvalue(),
+        file_name=f"{state.session_id}.zip",
+        mime="application/zip",
+        key=f"dlzip_{key_prefix}_{state.session_id}",
+        use_container_width=True,
+    )
+
     tabs = st.tabs([p.name for p in files])
     for tab, p in zip(tabs, files):
         with tab:
@@ -180,7 +199,13 @@ def _render_completed_session(
         new_dest = st.text_input(
             "New Dropbox destination folder",
             value=state.destination_folder,
-            help="Must start with '/'.",
+            help=(
+                "Enter a Dropbox path like `/Patients/Darelyn`, OR paste a "
+                "Dropbox URL from your browser's address bar "
+                "(e.g. `https://www.dropbox.com/home/Team%20Folder/...`) — "
+                "the app converts it to a path automatically."
+            ),
+            placeholder="/Patients/Darelyn  or  https://www.dropbox.com/home/…",
         )
         if recents:
             picked = st.selectbox(
@@ -329,7 +354,12 @@ with tab_new:
             destination = st.text_input(
                 "Custom Dropbox folder",
                 value=default_dest,
-                help="Must be a Dropbox path starting with '/'.",
+                help=(
+                    "Enter a Dropbox path, OR paste a Dropbox URL from your "
+                    "browser's address bar — the app converts URLs to paths "
+                    "automatically."
+                ),
+                placeholder="/Patients/Darelyn  or  https://www.dropbox.com/home/…",
             )
         destination = normalize_dropbox_folder(destination) if destination else default_dest
 
