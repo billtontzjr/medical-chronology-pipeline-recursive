@@ -135,9 +135,18 @@ def recent_destinations(pipeline: MedicalChronologyPipeline, limit: int = 5) -> 
 
 
 def _render_completed_session(
-    pipeline: MedicalChronologyPipeline, state: SessionState
+    pipeline: MedicalChronologyPipeline,
+    state: SessionState,
+    *,
+    key_prefix: str = "default",
 ) -> None:
-    """Show output tabs, download buttons, and re-upload controls."""
+    """Show output tabs, download buttons, and re-upload controls.
+
+    ``key_prefix`` disambiguates widget keys when the same session is
+    rendered in multiple places on one page (e.g. the New Run tab's
+    current-session panel AND the Sessions tab expander). Streamlit
+    requires every widget key to be unique across the whole script run.
+    """
     st.markdown("### 📄 Generated files")
     out_dir = Path(pipeline.store.output_dir(state.session_id))
     files = sorted([p for p in out_dir.iterdir() if p.is_file()])
@@ -161,13 +170,13 @@ def _render_completed_session(
                 data=content,
                 file_name=p.name,
                 mime="application/json" if p.suffix == ".json" else "text/markdown",
-                key=f"dl_{state.session_id}_{p.name}",
+                key=f"dl_{key_prefix}_{state.session_id}_{p.name}",
             )
 
     st.markdown("### 📤 Re-upload to Dropbox")
     st.caption(f"Last uploaded to `{state.destination_folder}`")
     recents = recent_destinations(pipeline)
-    with st.form(f"reupload_{state.session_id}"):
+    with st.form(f"reupload_{key_prefix}_{state.session_id}"):
         new_dest = st.text_input(
             "New Dropbox destination folder",
             value=state.destination_folder,
@@ -425,7 +434,7 @@ with tab_new:
 
             # If completed, show outputs + re-upload
             if state.status == STATUS_COMPLETE:
-                _render_completed_session(pipeline, state)
+                _render_completed_session(pipeline, state, key_prefix="newrun")
 
 
 # -------------------------------------------------------------- SESSIONS tab
@@ -480,7 +489,7 @@ with tab_sessions:
                         st.rerun()
 
                 if s.status == STATUS_COMPLETE:
-                    _render_completed_session(pipeline, s)
+                    _render_completed_session(pipeline, s, key_prefix="sessions")
 
 
 st.markdown("---")
