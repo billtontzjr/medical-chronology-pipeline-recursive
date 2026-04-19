@@ -19,16 +19,23 @@ except ImportError:
 class ChronologyAgent:
     """Generate medical chronologies using direct Anthropic API calls."""
 
-    def __init__(self, api_key: str):
+    # Default model. Override via env var ANTHROPIC_MODEL if needed.
+    DEFAULT_MODEL = "claude-sonnet-4-6"
+
+    def __init__(self, api_key: str, model: Optional[str] = None):
         """
         Initialize the chronology agent.
 
         Args:
-            api_key: Anthropic API key
+            api_key: Anthropic API key.
+            model: Override the Claude model ID. Defaults to
+                ``DEFAULT_MODEL`` or the ``ANTHROPIC_MODEL`` env var.
         """
         # Sanitize API key - remove any whitespace/newlines that break HTTP headers
         if api_key:
             api_key = api_key.strip()
+
+        self.model = model or os.getenv("ANTHROPIC_MODEL") or self.DEFAULT_MODEL
 
         # Configure HTTP client with aggressive retry and timeout settings
         http_client = httpx.Client(
@@ -74,10 +81,10 @@ class ChronologyAgent:
         for attempt in range(max_retries):
             try:
                 response = self.client.messages.create(
-                    model="claude-sonnet-4-5-20250929",
+                    model=self.model,
                     max_tokens=max_tokens,
                     temperature=0,
-                    messages=[{"role": "user", "content": prompt}]
+                    messages=[{"role": "user", "content": prompt}],
                 )
                 return response.content[0].text.strip()
 
@@ -652,217 +659,356 @@ Do NOT include header or JSON - just the chronology entries."""
         # Call Claude with retry logic
         return self._call_api_with_retry(prompt, max_tokens=8000)
 
+    # ------------------------------------------------------------------ batches
+    def _plan_batches(self, documents: List[Dict]) -> List[List[Dict]]:
+        """Split documents into token-bounded batches."""
+        MAX_BATCH_TOKENS = 60000  # conservative — leaves room for prompt + response
+        batches: List[List[Dict]] = []
+        current: List[Dict] = []
+        current_tokens = 0
+        for doc in documents:
+            doc_tokens = len(doc["content"]) // 4  # ~4 chars/token
+            if current and (current_tokens + doc_tokens) > MAX_BATCH_TOKENS:
+                batches.append(current)
+                current = [doc]
+                current_tokens = doc_tokens
+            else:
+                current.append(doc)
+                current_tokens += doc_tokens
+        if current:
+            batches.append(current)
+        return batches
+
+    def generate_batches(
+        self,
+        input_dir: str,
+        batches_dir: str,
+        progress_callback: Optional[Callable[[str], None]] = None,
+        should_pause: Optional[Callable[[], bool]] = None,
+    ) -> Dict:
+        """Run Claude over every batch, saving each result to disk.
+
+        Idempotent: batches whose output file already exists (and is non-empty)
+        are skipped on rerun, so this supports resume after a pause or crash.
+
+        Args:
+            input_dir: directory containing extracted ``*.txt`` files.
+            batches_dir: directory to write ``batch_NN.md`` files to.
+            progress_callback: optional callable invoked with status strings.
+            should_pause: optional callable returning True to request a
+                cooperative pause. Checked between batches. Raises
+                :class:`PauseRequested` if it returns True.
+
+        Returns:
+            ``{'success': bool, 'total_batches': int, 'documents': int, ...}``
+        """
+        from .session_state import PauseRequested
+
+        documents = self._read_extracted_files(input_dir)
+        if not documents:
+            return {"success": False, "error": "No extracted text files found"}
+
+        batches = self._plan_batches(documents)
+        total_batches = len(batches)
+        batches_path = Path(batches_dir)
+        batches_path.mkdir(parents=True, exist_ok=True)
+
+        if progress_callback:
+            progress_callback(
+                f"🤖 {len(documents)} documents → {total_batches} batch(es)"
+            )
+
+        BATCH_DELAY = 3
+        completed = 0
+        skipped = 0
+        for batch_num, batch in enumerate(batches, 1):
+            batch_file = batches_path / f"batch_{batch_num:03d}.md"
+            if batch_file.exists() and batch_file.stat().st_size > 0:
+                completed += 1
+                skipped += 1
+                if progress_callback:
+                    progress_callback(
+                        f"⏭️  Batch {batch_num}/{total_batches} already done — skipping"
+                    )
+                continue
+
+            if should_pause and should_pause():
+                raise PauseRequested(f"Paused before batch {batch_num}")
+
+            if progress_callback:
+                progress_callback(
+                    f"📝 Batch {batch_num}/{total_batches} ({len(batch)} docs)…"
+                )
+            batch_md = self._process_batch(batch, batch_num, total_batches)
+
+            # Write atomically so a crash mid-write doesn't leave a partial file
+            tmp = batch_file.with_suffix(".md.tmp")
+            tmp.write_text(batch_md, encoding="utf-8")
+            os.replace(tmp, batch_file)
+            completed += 1
+
+            if batch_num < total_batches:
+                time.sleep(BATCH_DELAY)
+
+        if progress_callback:
+            msg = f"✅ {completed}/{total_batches} batches ready"
+            if skipped:
+                msg += f" ({skipped} resumed from disk)"
+            progress_callback(msg)
+
+        return {
+            "success": True,
+            "total_batches": total_batches,
+            "documents": len(documents),
+            "batches_completed": completed,
+            "batches_skipped_from_disk": skipped,
+        }
+
+    # -------------------------------------------------------------- rendering
+    def _combine_batches(self, batches_dir: str) -> str:
+        """Read every ``batch_NNN.md`` in order, concatenate, sort, dedup."""
+        batches_path = Path(batches_dir)
+        files = sorted(batches_path.glob("batch_*.md"))
+        if not files:
+            return ""
+        combined = "\n\n".join(f.read_text(encoding="utf-8").strip() for f in files)
+        return self._sort_entries_chronologically(combined)
+
+    def extract_header(
+        self,
+        input_dir: str,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> Dict[str, str]:
+        """Extract patient name, date of birth, and date of injury from records.
+
+        Sends a short slice of the most likely-informative documents to Claude
+        and asks for a strict JSON response. Returns placeholders if the model
+        cannot confidently identify a field.
+        """
+        if progress_callback:
+            progress_callback("🪪 Extracting patient header from records…")
+
+        docs = self._read_extracted_files(input_dir)
+        if not docs:
+            return {
+                "patient_name": "[See Records]",
+                "date_of_birth": "[See Records]",
+                "date_of_injury": "[See Records]",
+            }
+
+        # Build a short corpus: first 2000 chars of each doc, up to ~40k chars total
+        snippets: List[str] = []
+        total = 0
+        BUDGET = 40000
+        for d in docs:
+            snippet = d["content"][:2000]
+            if total + len(snippet) > BUDGET:
+                break
+            snippets.append(f"=== {d['filename']} ===\n{snippet}")
+            total += len(snippet)
+        corpus = "\n\n".join(snippets)
+
+        prompt = (
+            "You are reading excerpts from medical records for a single patient. "
+            "Return STRICT JSON with three fields: patient_name (FULL NAME in ALL CAPS), "
+            "date_of_birth (formatted 'Month Day, YYYY'), and date_of_injury "
+            "(formatted 'Month Day, YYYY'). If a field cannot be determined with "
+            "high confidence, use the string '[See Records]'. Do NOT include any "
+            "other text — just the JSON object.\n\n"
+            f"RECORDS EXCERPTS:\n{corpus}\n\n"
+            'Respond with ONLY the JSON object, no code fences, no commentary.'
+        )
+        try:
+            raw = self._call_api_with_retry(prompt, max_tokens=500)
+            # Strip potential code fences defensively
+            raw = raw.strip()
+            if raw.startswith("```"):
+                raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                raw = re.sub(r"\s*```$", "", raw)
+            data = json.loads(raw)
+            return {
+                "patient_name": str(data.get("patient_name") or "[See Records]"),
+                "date_of_birth": str(data.get("date_of_birth") or "[See Records]"),
+                "date_of_injury": str(data.get("date_of_injury") or "[See Records]"),
+            }
+        except Exception as e:
+            self.logger.warning(f"Header extraction failed, using placeholders: {e}")
+            return {
+                "patient_name": "[See Records]",
+                "date_of_birth": "[See Records]",
+                "date_of_injury": "[See Records]",
+            }
+
+    def generate_summary_and_gaps(
+        self,
+        chronology_md: str,
+        source_filenames: List[str],
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> Dict[str, str]:
+        """Produce an executive summary and a gaps analysis from the chronology.
+
+        Falls back to short placeholder text if the API call fails — callers
+        should treat failure as non-fatal.
+        """
+        if progress_callback:
+            progress_callback("🧾 Generating executive summary and gaps analysis…")
+
+        # Keep chronology input bounded for this call
+        MAX_CHARS = 120000
+        snippet = chronology_md if len(chronology_md) <= MAX_CHARS else chronology_md[:MAX_CHARS]
+        file_list = "\n".join(f"- {name}" for name in source_filenames)
+
+        prompt = (
+            "You are a medical-legal analyst. Given the medical chronology "
+            "below, produce TWO markdown documents separated exactly by the "
+            "marker line '===GAPS===' on its own line.\n\n"
+            "FIRST document: an Executive Summary (plain prose, no bullets, "
+            "2-4 short paragraphs) covering: (1) the mechanism and date of "
+            "injury, (2) the principal diagnoses, (3) the course of treatment "
+            "including imaging and interventions, and (4) current status and "
+            "outstanding issues. Do not use bold, bullets, or headings.\n\n"
+            "SECOND document: a Gaps and Quality Notes analysis (plain prose) "
+            "flagging: missing or unexplained gaps in care, dates referenced in "
+            "records that lack corresponding entries, OCR-looking artifacts, "
+            "ambiguous provider attributions, and any records that warrant "
+            "manual review. Use a direct factual tone. No bullets, no bold.\n\n"
+            f"SOURCE FILES USED:\n{file_list}\n\n"
+            f"CHRONOLOGY:\n{snippet}\n\n"
+            "Remember: output the Executive Summary FIRST, then a line reading "
+            "exactly ===GAPS=== , then the Gaps document. Do NOT restate the "
+            "chronology. Do NOT include preambles."
+        )
+        try:
+            raw = self._call_api_with_retry(prompt, max_tokens=3000)
+            if "===GAPS===" in raw:
+                summary_part, gaps_part = raw.split("===GAPS===", 1)
+            else:
+                # Fallback: treat entire response as summary
+                summary_part, gaps_part = raw, "Gaps analysis unavailable."
+            return {
+                "summary_md": summary_part.strip(),
+                "gaps_md": gaps_part.strip(),
+            }
+        except Exception as e:
+            self.logger.warning(f"Summary/gaps generation failed: {e}")
+            return {
+                "summary_md": (
+                    "Executive summary could not be generated automatically. "
+                    "Please review chronology.md directly."
+                ),
+                "gaps_md": (
+                    "Automated gaps analysis failed. Review source documents "
+                    "against chronology.md for completeness."
+                ),
+            }
+
+    def assemble_outputs(
+        self,
+        input_dir: str,
+        batches_dir: str,
+        output_dir: str,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> Dict:
+        """Stitch per-batch output into final chronology + summary + gaps + JSON.
+
+        Call after :meth:`generate_batches`. Safe to call multiple times — it
+        simply rewrites the output files from the batch directory.
+        """
+        if progress_callback:
+            progress_callback("🔄 Stitching batches and sorting chronologically…")
+
+        body = self._combine_batches(batches_dir)
+        if not body:
+            return {"success": False, "error": "No batch output files found to assemble"}
+
+        # Extract real patient header
+        header_info = self.extract_header(input_dir, progress_callback)
+        header = (
+            "MEDICAL RECORDS SUMMARY\n"
+            f"{header_info['patient_name']}\n"
+            f"Date of Birth: {header_info['date_of_birth']}\n"
+            f"Date of Injury: {header_info['date_of_injury']}\n\n"
+        )
+        chronology_md = header + body
+
+        # Real summary + gaps
+        source_files = [p.name for p in sorted(Path(input_dir).glob("*.txt"))]
+        docs_md = self.generate_summary_and_gaps(
+            chronology_md, source_files, progress_callback
+        )
+        summary_md = docs_md["summary_md"]
+        gaps_md = docs_md["gaps_md"]
+
+        # Structured JSON (proper serialization, no hand-rolled escaping)
+        chronology_json = {
+            "metadata": {
+                "patient_name": header_info["patient_name"],
+                "date_of_birth": header_info["date_of_birth"],
+                "date_of_injury": header_info["date_of_injury"],
+                "generated": datetime.now().isoformat(timespec="seconds"),
+                "documents_processed": len(source_files),
+                "batches": len(list(Path(batches_dir).glob("batch_*.md"))),
+            },
+            "chronology_markdown": chronology_md,
+            "source_files": source_files,
+        }
+
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        files_written: Dict[str, str] = {}
+
+        def _atomic_write(path: Path, text: str) -> None:
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, path)
+
+        chronology_file = output_path / "chronology.md"
+        _atomic_write(chronology_file, chronology_md)
+        files_written["chronology.md"] = str(chronology_file)
+
+        json_file = output_path / "chronology.json"
+        _atomic_write(json_file, json.dumps(chronology_json, indent=2))
+        files_written["chronology.json"] = str(json_file)
+
+        summary_file = output_path / "summary.md"
+        _atomic_write(summary_file, summary_md)
+        files_written["summary.md"] = str(summary_file)
+
+        gaps_file = output_path / "gaps.md"
+        _atomic_write(gaps_file, gaps_md)
+        files_written["gaps.md"] = str(gaps_file)
+
+        if progress_callback:
+            progress_callback("✅ Output files written")
+
+        return {
+            "success": True,
+            "files": files_written,
+            "header": header_info,
+            "source_files": source_files,
+        }
+
+    # ------------------------------------------- legacy all-in-one convenience
     def generate_chronology(
         self,
         input_dir: str,
         output_dir: str,
         base_dir: str,
-        progress_callback: Optional[Callable[[str], None]] = None
+        progress_callback: Optional[Callable[[str], None]] = None,
     ) -> Dict:
-        """
-        Generate medical chronology from extracted text files.
+        """Backwards-compatible one-shot: batches + assemble, no resume.
 
-        Args:
-            input_dir: Directory containing extracted .txt files
-            output_dir: Directory to write output files
-            base_dir: Base directory containing .claude/CLAUDE.md
-            progress_callback: Optional callback for progress updates
-
-        Returns:
-            Dictionary with generation results
+        Kept for any external caller; the pipeline now drives
+        :meth:`generate_batches` and :meth:`assemble_outputs` separately so it
+        can checkpoint between them.
         """
         try:
-            # Load rules
-            if progress_callback:
-                progress_callback("📖 Loading chronology generation rules...")
-            rules = self._load_rules(base_dir)
-
-            # Read all extracted documents
-            if progress_callback:
-                progress_callback(f"📄 Reading extracted documents from {Path(input_dir).name}...")
-            documents = self._read_extracted_files(input_dir)
-
-            if not documents:
-                return {
-                    'success': False,
-                    'error': 'No extracted text files found'
-                }
-
-            # Dynamic batching based on estimated token size
-            # Estimate: ~4 chars per token (conservative)
-            # Very conservative limit to account for prompt overhead
-            MAX_BATCH_TOKENS = 60000  # Much smaller batches to stay well under 200K with prompts
-
-            batches = []
-            current_batch = []
-            current_batch_tokens = 0
-
-            for doc in documents:
-                # Estimate tokens for this document
-                doc_tokens = len(doc['content']) // 4
-
-                # If adding this doc would exceed limit, start new batch
-                if current_batch and (current_batch_tokens + doc_tokens) > MAX_BATCH_TOKENS:
-                    batches.append(current_batch)
-                    current_batch = [doc]
-                    current_batch_tokens = doc_tokens
-                else:
-                    current_batch.append(doc)
-                    current_batch_tokens += doc_tokens
-
-            # Add final batch
-            if current_batch:
-                batches.append(current_batch)
-
-            total_batches = len(batches)
-            self.logger.info(f"Created {total_batches} batches from {len(documents)} documents")
-
-            if progress_callback:
-                if total_batches > 1:
-                    progress_callback(f"🤖 Processing {len(documents)} documents in {total_batches} batches...")
-                else:
-                    progress_callback(f"🤖 Generating chronology from {len(documents)} documents...")
-
-            # Process each batch with rate limiting
-            batch_results = []
-            BATCH_DELAY = 3  # 3 second delay between batches to avoid overwhelming API
-
-            for batch_num, batch in enumerate(batches, 1):
-                batch_docs = len(batch)
-                if progress_callback and total_batches > 1:
-                    progress_callback(f"📝 Batch {batch_num}/{total_batches} ({batch_docs} documents)...")
-                elif progress_callback:
-                    progress_callback(f"📝 Processing {batch_docs} documents...")
-
-                batch_chronology = self._process_batch(batch, batch_num, total_batches)
-                batch_results.append(batch_chronology)
-                self.logger.info(f"Batch {batch_num}/{total_batches} completed ({batch_docs} documents)")
-
-                # Add delay between batches (except after the last one)
-                if batch_num < total_batches:
-                    self.logger.info(f"Waiting {BATCH_DELAY}s before next batch (rate limiting)...")
-                    time.sleep(BATCH_DELAY)
-
-            # Combine all batch results and perform global sort
-            if progress_callback and total_batches > 1:
-                progress_callback(f"🔄 Combining {total_batches} batches and sorting chronologically...")
-            elif progress_callback:
-                progress_callback(f"🔄 Sorting entries chronologically...")
-
-            # First, concatenate all batch results
-            combined_entries = "\n\n".join(batch_results)
-            
-            # Perform global chronological sort on all entries
-            self.logger.info("Performing global chronological sort on all entries...")
-            combined_entries = self._sort_entries_chronologically(combined_entries)
-
-            # Add header manually (don't send all entries back to API - too large)
-            if progress_callback:
-                progress_callback(f"📋 Adding header and generating summary...")
-
-            # Generic header
-            header = """MEDICAL RECORDS SUMMARY
-[Patient Name - See Records]
-Date of Birth: [See Records]
-Date of Injury: [See Records]
-
-"""
-
-            chronology_md = header + combined_entries
-
-            # Generate a simple summary based on document count only
-            summary_md = f"""Executive Summary
-
-This medical chronology was generated from {len(documents)} medical documents processed in {total_batches} batch(es).
-
-The chronology contains entries organized chronologically documenting the patient's medical journey including:
-- Office visits and consultations
-- Imaging studies and diagnostic tests
-- Treatment plans and interventions
-- Follow-up care and therapy sessions
-
-Please review the complete chronology below for detailed medical information."""
-
-            gaps_md = f"""Document Analysis
-
-**Processing Summary:**
-- Total Documents Processed: {len(documents)}
-- Processing Method: {'Single batch' if total_batches == 1 else f'Multiple batches ({total_batches} batches)'}
-- OCR Quality: Review individual entries for any OCR artifacts or unclear text
-
-**Recommendations:**
-- Verify all dates and provider information against source documents
-- Cross-reference critical findings with original records
-- Note any documents that may require manual review for OCR quality"""
-
-            # Generate simple JSON structure
-            # Escape the chronology text properly for JSON
-            chronology_escaped = chronology_md.replace('"', '\\"').replace('\n', '\\n')
-            chronology_json_text = f"""{{
-  "metadata": {{
-    "generated": "{datetime.now().isoformat()}",
-    "documents_processed": {len(documents)},
-    "batches": {total_batches}
-  }},
-  "chronology": "{chronology_escaped}"
-}}"""
-
-            # Write output files
-            output_path = Path(output_dir)
-            output_path.mkdir(parents=True, exist_ok=True)
-
-            files_written = {}
-
-            # Write chronology.md
-            chronology_file = output_path / 'chronology.md'
-            with open(chronology_file, 'w', encoding='utf-8') as f:
-                f.write(chronology_md)
-            files_written['chronology.md'] = str(chronology_file)
-            self.logger.info(f"✓ Written: chronology.md ({len(chronology_md)} chars)")
-
-            # Write chronology.json
-            try:
-                # Try to parse and pretty-print JSON
-                json_data = json.loads(chronology_json_text)
-                json_file = output_path / 'chronology.json'
-                with open(json_file, 'w', encoding='utf-8') as f:
-                    json.dump(json_data, f, indent=2)
-                files_written['chronology.json'] = str(json_file)
-                self.logger.info(f"✓ Written: chronology.json")
-            except json.JSONDecodeError as e:
-                self.logger.warning(f"Failed to parse JSON: {e}")
-                # Write raw JSON text anyway
-                json_file = output_path / 'chronology.json'
-                with open(json_file, 'w', encoding='utf-8') as f:
-                    f.write(chronology_json_text)
-                files_written['chronology.json'] = str(json_file)
-
-            # Write summary.md
-            summary_file = output_path / 'summary.md'
-            with open(summary_file, 'w', encoding='utf-8') as f:
-                f.write(summary_md)
-            files_written['summary.md'] = str(summary_file)
-            self.logger.info(f"✓ Written: summary.md")
-
-            # Write gaps.md
-            gaps_file = output_path / 'gaps.md'
-            with open(gaps_file, 'w', encoding='utf-8') as f:
-                f.write(gaps_md)
-            files_written['gaps.md'] = str(gaps_file)
-            self.logger.info(f"✓ Written: gaps.md")
-
-            if progress_callback:
-                progress_callback(f"✅ Generated chronology with {len(documents)} documents")
-
-            return {
-                'success': True,
-                'files': files_written,
-                'documents_processed': len(documents)
-            }
-
+            # Use a tmp batches dir inside the output dir for legacy callers
+            batches_dir = str(Path(output_dir) / "_batches")
+            gen = self.generate_batches(input_dir, batches_dir, progress_callback)
+            if not gen["success"]:
+                return gen
+            return self.assemble_outputs(input_dir, batches_dir, output_dir, progress_callback)
         except Exception as e:
             self.logger.error(f"Chronology generation failed: {e}")
-            return {
-                'success': False,
-                'error': str(e)
-            }
+            return {"success": False, "error": str(e)}
