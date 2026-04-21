@@ -183,7 +183,9 @@ def _render_completed_session(
                 except json.JSONDecodeError:
                     st.code(content, language="json")
             else:
-                st.markdown(content)
+                # Escape '$' so Streamlit's KaTeX renderer doesn't treat
+                # pairs of dollar signs (e.g. currency amounts) as math.
+                st.markdown(content.replace("$", "\\$"))
             st.download_button(
                 label=f"⬇️ Download {p.name}",
                 data=content,
