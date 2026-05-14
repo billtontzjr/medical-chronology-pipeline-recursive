@@ -1,0 +1,10 @@
+anthropic>=0.40.0
+streamlit>=1.30.0
+pydantic>=2.5.0
+python-docx>=1.1.0
+google-cloud-vision>=3.5.0
+dropbox>=11.36.2
+httpx>=0.25.0
+python-dotenv>=1.0.0
+pytest>=7.4.0
+pytest-cov>=4.1.0

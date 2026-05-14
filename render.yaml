@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: precision-chronology
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: GOOGLE_VISION_API_KEY
+        sync: false
+      - key: DROPBOX_APP_KEY
+        sync: false
+      - key: DROPBOX_APP_SECRET
+        sync: false
+      - key: ANTHROPIC_MODEL
+        value: claude-sonnet-4-6
+    # Optional persistent disk for session resume across deploys.
+    # Uncomment to attach a 1 GB disk (~$1/month). Without it, in-flight sessions
+    # are lost on redeploy but otherwise the app works.
+    # disk:
+    #   name: sessions
+    #   mountPath: /app/data/sessions
+    #   sizeGB: 1
