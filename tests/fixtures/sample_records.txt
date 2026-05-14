@@ -1,0 +1,29 @@
+=== PAGE 1 ===
+Patient Name: JANE DOE
+Date of Birth: 03/14/1980
+Date of Injury: 09/20/2023
+
+Pacific Spine Clinic
+Office Visit Date: 03/14/2024
+Provider: Jane Smith, MD
+
+Chief Complaint: low back pain after a motor vehicle collision.
+History of Present Illness: Patient was a restrained driver in a rear-end collision on 09/20/2023.
+Assessment: L4-L5 disc herniation with right radiculopathy.
+Plan: Physical therapy and follow-up in two weeks.
+
+=== PAGE 2 ===
+MRI Associates
+Date: 10/24/2023
+Procedure: MRI Lumbar Spine without contrast
+Interpreting Radiologist: Rudy Heiser, DC
+
+Impression: 2mm right foraminal herniation at L5-S1 with annular tear.
+
+=== PAGE 3 ===
+Pacific Spine Clinic
+Follow-up Visit Date: 04/02/2024
+Provider: Jane Smith, MD
+
+Patient reports decreased pain after physical therapy.
+Plan: Continue PT for four more weeks.
