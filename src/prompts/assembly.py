@@ -70,16 +70,17 @@ PROVIDER NAME RULES:
 - If the source has "Last, First" format, flip to "First Last".
 - If the source has the credential appearing twice (e.g. "Bobrik MD, Linda, MD"), deduplicate to "Linda Bobrik, MD".
 - If no credential appears in any verified fact for the visit, do not append one.
-- Recognized credentials: MD, DO, PA, PA-C, NP, RN, PT, DPT, OD, DC, DPM, PsyD, PharmD, D.O, M.D.
+- Recognized credentials: MD, DO, PA, PA-C, NP, RN, PT, DPT, OD, DC, DPM, PsyD, PharmD, FNP. Even if the source writes "M.D." with periods, output it as "MD" without periods.
 
 ABBREVIATION RULES:
-- Expand these abbreviations to full form on first use within the entry:
-  ER -> Emergency Department, PCN -> penicillin, USP -> United States Penitentiary (when followed by a facility name), MVA -> motor vehicle accident.
-  EMC -> use the full facility name if provided elsewhere in the verified facts; otherwise leave as EMC.
-- Leave these universally understood abbreviations as-is: NSAID, COPD, BPPV, GERD, MRI, CT, X-ray, EKG, ECG, IV, IM, PO, PRN, BID, TID, QID, qd, qhs.
+- Preserve clinical abbreviations exactly as they appear in the source records. Do NOT expand them. These should stay as abbreviations: ED, MVC, MVA, ROM, AROM, BUE, BLE, RUE, RLE, SLR, TFESI, ACDF, CMT, MT, EMS, ESI, NSAID, COPD, BPPV, GERD, MRI, CT, X-ray, EKG, ECG, IV, IM, PO, PRN, BID, TID, QID, qd, qhs, OTC, PT, OT, ST, SLP, DME, ADL, DOI, FNP, PA-C.
+- Only standardize abbreviation formatting (consistent capitalization), do not expand to long form.
+- Single exception: if the source uses "ER" or "Emergency Room", standardize to "ED" (do NOT spell out "Emergency Department" in full).
 
 VISIT TYPE RULES:
-- Use title case for visit type labels: Office Visit, Follow-up, Telehealth, Therapy, Procedure, Imaging, Emergency Department. Any other visit type passes through with title-case capitalization.
+- Use the visit type as named in the source records, with title case. Match what the source document calls the visit.
+- Examples of acceptable visit type labels: Initial Report, Progress Note, Established Patient Visit, New Patient Visit, ED Provider Note, Discharge Summary, Operative Report, Chiropractic Initial Report, Chiropractic Re-Evaluation Note, Chiropractic Final Report, Physical Therapy Initial Evaluation, Physical Therapy Progress Note, Physical Therapy Discharge Summary, Follow-up, Telehealth, Office Visit (only when source does not specify more specific type), Imaging, Procedure Note.
+- For imaging visits, include the specific study in the visit type label when known from verified facts (e.g., "MRI Cervical Spine without Contrast", "X-ray of Cervical Spine 5 Views", "MRI Brain without Contrast").
 
 DATE FORMATTING IN ENTRY BODY:
 - Any specific date (month + day + year) appearing in the entry body must be rewritten as MM/DD/YYYY with four-digit year and zero-padded month and day. Examples: "March 26, 2025" -> "03/26/2025", "03/06/25" -> "03/06/2025".
