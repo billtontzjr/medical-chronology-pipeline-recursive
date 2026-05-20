@@ -73,6 +73,46 @@ def _load_verified(jsonl_path: Path) -> List[VerifiedFact]:
     return facts
 
 
+_CREDENTIAL_TOKENS = [
+    "pa-c", "dpt", "pharmd", "psyd",
+    "md", "do", "pa", "np", "rn", "pt", "od", "dc", "dpm", "fnp",
+]
+
+
+def _build_credential_lookup(facts: List[VerifiedFact]) -> Dict[str, str]:
+    """Map normalized provider names to their known credentials.
+
+    Scans ALL verified facts to build a session-wide lookup so that
+    credentials can be propagated to visits where they are absent.
+    """
+    import re
+
+    lookup: Dict[str, str] = {}
+    for fact in facts:
+        name = fact.provider_name
+        cred = fact.provider_credentials
+        if not name or not cred:
+            continue
+        # Normalize: lowercase, strip
+        normalized = name.strip().lower()
+        # Remove trailing credential tokens that may be embedded in the name
+        for token in _CREDENTIAL_TOKENS:
+            normalized = re.sub(
+                rf"[,\s]+{re.escape(token)}\.?\s*$", "", normalized,
+                flags=re.IGNORECASE,
+            )
+        # Handle "Last, First" -> "first last" for matching
+        normalized = normalized.strip().rstrip(",").strip()
+        # Remove middle initials for broader matching ("christopher t behr" -> "christopher behr")
+        parts = normalized.split()
+        core_parts = [p for p in parts if len(p) > 1 or p == parts[-1]]
+        normalized_core = " ".join(core_parts)
+        cred_clean = cred.strip().replace(".", "")
+        if normalized_core and cred_clean:
+            lookup[normalized_core] = cred_clean
+    return lookup
+
+
 def run_assembly(
     session_store: SessionStore,
     session_id: str,
@@ -96,6 +136,9 @@ def run_assembly(
 
     ordered_keys = sorted(groups.keys(), key=_sort_key)
 
+    # Build a session-wide provider credential lookup for propagation
+    credential_lookup = _build_credential_lookup(facts)
+
     if progress_callback:
         progress_callback(
             f"Assembly: {len(facts)} verified facts in {len(ordered_keys)} visit group(s)"
@@ -112,7 +155,9 @@ def run_assembly(
             facility = visit_key.get("facility") or "Unknown"
             progress_callback(f"Assembly: {idx}/{len(ordered_keys)} {label} {facility}")
 
-        prompt = build_assembly_prompt(visit_key, groups[key])
+        prompt = build_assembly_prompt(
+            visit_key, groups[key], known_credentials=credential_lookup
+        )
         text = anthropic_client.complete(prompt, model=model, max_tokens=2000).strip()
         if not text:
             log.warning("Empty assembly output for visit_key=%s", visit_key)

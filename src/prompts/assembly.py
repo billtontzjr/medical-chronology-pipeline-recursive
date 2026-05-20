@@ -10,7 +10,7 @@ facts.
 from __future__ import annotations
 
 import json
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from src.schemas import VerifiedFact
 
@@ -72,15 +72,24 @@ PROVIDER NAME RULES:
 - If no credential appears in any verified fact for the visit, do not append one.
 - Recognized credentials: MD, DO, PA, PA-C, NP, RN, PT, DPT, OD, DC, DPM, PsyD, PharmD, FNP. Even if the source writes "M.D." with periods, output it as "MD" without periods.
 
+PROVIDER CREDENTIAL PROPAGATION:
+- A KNOWN_PROVIDER_CREDENTIALS lookup is provided below, mapping provider names to credentials known from other visits in this chronology.
+- If the verified facts for THIS visit do not include a credential for a provider, but the KNOWN_PROVIDER_CREDENTIALS lookup contains that provider's credential, USE the credential from the lookup.
+- Format remains "First Last, Credential" with no internal periods on credentials.
+
+KNOWN_PROVIDER_CREDENTIALS:
+{known_credentials_json}
+
 ABBREVIATION RULES:
 - Preserve clinical abbreviations exactly as they appear in the source records. Do NOT expand them. These should stay as abbreviations: ED, MVC, MVA, ROM, AROM, BUE, BLE, RUE, RLE, SLR, TFESI, ACDF, CMT, MT, EMS, ESI, NSAID, COPD, BPPV, GERD, MRI, CT, X-ray, EKG, ECG, IV, IM, PO, PRN, BID, TID, QID, qd, qhs, OTC, PT, OT, ST, SLP, DME, ADL, DOI, FNP, PA-C.
 - Only standardize abbreviation formatting (consistent capitalization), do not expand to long form.
-- Single exception: if the source uses "ER" or "Emergency Room", standardize to "ED" (do NOT spell out "Emergency Department" in full).
+- Single exception: if the source uses "ER" or "Emergency Room" as the visit type label, standardize the visit type label to "ED". If the source uses "ER" or "Emergency Room" in the body of an entry, also standardize to "ED". Do NOT spell out "Emergency Department" in either position.
 
 VISIT TYPE RULES:
 - Use the visit type as named in the source records, with title case. Match what the source document calls the visit.
 - Examples of acceptable visit type labels: Initial Report, Progress Note, Established Patient Visit, New Patient Visit, ED Provider Note, Discharge Summary, Operative Report, Chiropractic Initial Report, Chiropractic Re-Evaluation Note, Chiropractic Final Report, Physical Therapy Initial Evaluation, Physical Therapy Progress Note, Physical Therapy Discharge Summary, Follow-up, Telehealth, Office Visit (only when source does not specify more specific type), Imaging, Procedure Note.
 - For imaging visits, include the specific study in the visit type label when known from verified facts (e.g., "MRI Cervical Spine without Contrast", "X-ray of Cervical Spine 5 Views", "MRI Brain without Contrast").
+- Abbreviations within visit type labels should preserve fully-capitalized abbreviations exactly as commonly written (BP not Bp, ED not Ed, MRI not Mri, CT not Ct, EKG not Ekg, IV not Iv). Apply title case only to non-abbreviation words. Examples: "BP Check Telehealth" (not "Bp Check Telehealth"), "CT Chest" (not "Ct Chest"), "IV Push Procedure" (not "Iv Push Procedure").
 
 DATE FORMATTING IN ENTRY BODY:
 - Any specific date (month + day + year) appearing in the entry body must be rewritten as MM/DD/YYYY with four-digit year and zero-padded month and day. Examples: "March 26, 2025" -> "03/26/2025", "03/06/25" -> "03/06/2025".
@@ -98,12 +107,19 @@ ORTHO_ADDENDUM = (
 )
 
 
-def build_assembly_prompt(visit_key: Dict, facts: List[VerifiedFact]) -> str:
+def build_assembly_prompt(
+    visit_key: Dict,
+    facts: List[VerifiedFact],
+    *,
+    known_credentials: Optional[Dict[str, str]] = None,
+) -> str:
     facts_payload = [f.model_dump(mode="json") for f in facts]
+    creds = known_credentials or {}
     return PROMPT_TEMPLATE.format(
         visit_key=json.dumps(visit_key, indent=2),
         facts_json=json.dumps(facts_payload, indent=2),
         ortho_addendum=ORTHO_ADDENDUM if _is_ortho_visit(visit_key, facts) else "",
+        known_credentials_json=json.dumps(creds, indent=2) if creds else "(none)",
     )
 
 
