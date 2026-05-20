@@ -93,13 +93,13 @@ def test_quote_too_short():
 
 
 def test_quote_too_long_rejected():
-    # 31 word quote - all in the source
-    words = " ".join(f"w{i}" for i in range(31))
+    # 51 word quote - all in the source
+    words = " ".join(f"w{i}" for i in range(51))
     source = "intro " + words + " outro"
     verified, _, reason = _ws_then_verify(source, words)
     assert verified is False
     assert reason == "quote_too_long"
-    assert MAX_QUOTE_WORDS == 30
+    assert MAX_QUOTE_WORDS == 50
 
 
 def test_quote_with_leading_trailing_whitespace_matches():

@@ -26,7 +26,7 @@ from src.session_state import SessionStore
 
 
 MIN_QUOTE_CHARS = 5
-MAX_QUOTE_WORDS = 30
+MAX_QUOTE_WORDS = 50
 
 
 # ---------------------------------------------------------------- whitespace
