@@ -1,11 +1,14 @@
 """Phase 5 assembler: group verified facts and ask Claude to narrate.
 
 The assembler reads ``verified_facts.jsonl``, groups facts by
-``(visit_date, facility, provider_name)``, asks Claude for one
-paragraph per group, and writes the result to
-``output/chronology.md``. The assembler never sees the raw OCR text,
-which is the structural reason the assembled chronology cannot contain
-clinical content that did not come from a verified fact.
+``(visit_date, facility, visit_type)``, asks Claude for one entry per
+group, and writes the result to ``output/chronology.md``. When multiple
+providers contribute to the same visit, the entry includes provider
+sub-sections instead of separate chronology entries.
+
+The assembler never sees the raw OCR text, which is the structural
+reason the assembled chronology cannot contain clinical content that
+did not come from a verified fact.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from src.anthropic_client import AnthropicClient
-from src.prompts.assembly import build_assembly_prompt
+from src.prompts.assembly import build_assembly_prompt, build_multi_provider_prompt
 from src.schemas import VerifiedFact
 from src.session_state import SessionStore
 
@@ -28,28 +31,27 @@ HEADER_PLACEHOLDER = "<<HEADER_PLACEHOLDER>>"
 UNDATED_HEADING = "## Undated Entries"
 
 
-VisitKey = Tuple[str, str, str]  # (visit_date, facility, provider_name)
+# Consolidated key: (visit_date, facility, visit_type)
+ConsolidatedVisitKey = Tuple[str, str, str]
 
 
-def _key_for_fact(fact: VerifiedFact) -> VisitKey:
+def _consolidated_key_for_fact(fact: VerifiedFact) -> ConsolidatedVisitKey:
     return (
         fact.visit_date or "",
         fact.facility or UNKNOWN_PLACEHOLDER,
-        fact.provider_name or UNKNOWN_PLACEHOLDER,
+        fact.visit_type or UNKNOWN_PLACEHOLDER,
     )
 
 
-def _key_to_dict(key: VisitKey, sample: VerifiedFact) -> Dict:
+def _consolidated_key_to_dict(key: ConsolidatedVisitKey) -> Dict:
     return {
         "visit_date": key[0] or None,
         "facility": key[1] if key[1] != UNKNOWN_PLACEHOLDER else None,
-        "provider_name": key[2] if key[2] != UNKNOWN_PLACEHOLDER else None,
-        "provider_credentials": sample.provider_credentials,
-        "visit_type": sample.visit_type,
+        "visit_type": key[2] if key[2] != UNKNOWN_PLACEHOLDER else None,
     }
 
 
-def _sort_key(key: VisitKey) -> Tuple[int, str]:
+def _sort_key(key: ConsolidatedVisitKey) -> Tuple[int, str]:
     """Sort dated visits ascending; undated visits sort last."""
     date_str = key[0]
     if not date_str:
@@ -59,6 +61,17 @@ def _sort_key(key: VisitKey) -> Tuple[int, str]:
         return (0, dt.isoformat())
     except ValueError:
         return (0, date_str)
+
+
+def _sub_group_by_provider(
+    facts: List[VerifiedFact],
+) -> Dict[str, List[VerifiedFact]]:
+    """Sub-group facts within a consolidated visit by provider_name."""
+    groups: Dict[str, List[VerifiedFact]] = defaultdict(list)
+    for fact in facts:
+        provider = fact.provider_name or UNKNOWN_PLACEHOLDER
+        groups[provider].append(fact)
+    return dict(groups)
 
 
 def _load_verified(jsonl_path: Path) -> List[VerifiedFact]:
@@ -130,9 +143,9 @@ def run_assembly(
     log = logging.getLogger(__name__)
     facts = _load_verified(session_store.verified_facts_path(session_id))
 
-    groups: Dict[VisitKey, List[VerifiedFact]] = defaultdict(list)
+    groups: Dict[ConsolidatedVisitKey, List[VerifiedFact]] = defaultdict(list)
     for fact in facts:
-        groups[_key_for_fact(fact)].append(fact)
+        groups[_consolidated_key_for_fact(fact)].append(fact)
 
     ordered_keys = sorted(groups.keys(), key=_sort_key)
 
@@ -148,17 +161,36 @@ def run_assembly(
     undated_entries: List[str] = []
 
     for idx, key in enumerate(ordered_keys, start=1):
-        sample = groups[key][0]
-        visit_key = _key_to_dict(key, sample)
+        visit_key = _consolidated_key_to_dict(key)
         if progress_callback:
             label = visit_key.get("visit_date") or "(undated)"
             facility = visit_key.get("facility") or "Unknown"
             progress_callback(f"Assembly: {idx}/{len(ordered_keys)} {label} {facility}")
 
-        prompt = build_assembly_prompt(
-            visit_key, groups[key], known_credentials=credential_lookup
-        )
-        text = anthropic_client.complete(prompt, model=model, max_tokens=2000).strip()
+        visit_facts = groups[key]
+        provider_groups = _sub_group_by_provider(visit_facts)
+        unique_providers = [
+            p for p in provider_groups if p != UNKNOWN_PLACEHOLDER
+        ]
+
+        if len(unique_providers) <= 1:
+            # Single provider or all unknown: use standard single-paragraph prompt
+            sample = visit_facts[0]
+            single_key = dict(visit_key)
+            single_key["provider_name"] = sample.provider_name
+            single_key["provider_credentials"] = sample.provider_credentials
+            prompt = build_assembly_prompt(
+                single_key, visit_facts, known_credentials=credential_lookup
+            )
+            max_tokens = 2000
+        else:
+            # Multiple providers: use multi-provider prompt
+            prompt = build_multi_provider_prompt(
+                visit_key, provider_groups, known_credentials=credential_lookup
+            )
+            max_tokens = 4000  # larger output for multi-provider entries
+
+        text = anthropic_client.complete(prompt, model=model, max_tokens=max_tokens).strip()
         if not text:
             log.warning("Empty assembly output for visit_key=%s", visit_key)
             continue

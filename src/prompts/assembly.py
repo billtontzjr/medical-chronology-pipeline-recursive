@@ -107,6 +107,73 @@ ORTHO_ADDENDUM = (
 )
 
 
+MULTI_PROVIDER_PROMPT_TEMPLATE = """You are composing one chronology entry for a medical-legal report. This visit involved MULTIPLE PROVIDERS. Every clinical claim in your output MUST be supported by the verified facts JSON below. You may organize, narrate, and connect; you may NOT invent.
+
+VISIT IDENTITY:
+{visit_key}
+
+PROVIDER SECTIONS (each provider's verified facts):
+{provider_sections_json}
+
+OUTPUT FORMAT:
+The first line must follow this exact pattern:
+  MM/DD/YYYY. Facility Name. Visit Type.
+
+Then produce one section per provider, each starting on its own line with:
+  Provider Name, Credential - Role:
+followed by a single paragraph of their findings.
+
+PROVIDER ROLE LABELS:
+- RN -> Nursing
+- PAC or PA-C or PA -> Consulting
+- PT or DPT -> Physical Therapy
+- MD or DO with surgical/operative facts -> Surgical Procedure
+- MD or DO with imaging/radiology facts -> Imaging
+- MD or DO with ED/emergency facts -> ED Physician
+- MD or DO with general clinical facts -> Attending
+- If role is unclear from the facts, use the provider name without a role label.
+
+{hard_rules}
+{known_credentials_section}
+{ortho_addendum}
+
+OUTPUT (entry text only, no preamble, no commentary):
+"""
+
+MULTI_PROVIDER_HARD_RULES = """HARD RULES:
+- Do NOT include any clinical claim not in the verified facts.
+- Do NOT use em-dashes. Use periods or commas.
+- Do NOT include ICD-10 codes, page citations, or all-caps emphasis.
+- Do NOT prefix provider names with 'Provider:' or any label. Write names directly.
+- Credentials without internal periods: MD not M.D., DO not D.O.
+- Recognized credentials: MD, DO, PA, PA-C, NP, RN, PT, DPT, OD, DC, DPM, PsyD, PharmD, FNP.
+- Preserve clinical abbreviations as-is. Standardize ER/Emergency Room to ED.
+- Dates in body: rewrite specific dates to MM/DD/YYYY. Leave year-only or month-year references unchanged."""
+
+
+def _infer_role(credential: str, facts: List[VerifiedFact]) -> str:
+    """Infer provider role from credential and fact content."""
+    cred = (credential or "").upper().replace(".", "").strip()
+    if cred == "RN":
+        return "Nursing"
+    if cred in ("PAC", "PA-C", "PA"):
+        return "Consulting"
+    if cred in ("PT", "DPT"):
+        return "Physical Therapy"
+    if cred in ("MD", "DO"):
+        categories = {f.fact_category for f in facts if f.fact_category}
+        finding_text = " ".join(f.finding_text or "" for f in facts).lower()
+        if "procedure_performed" in categories or "operative" in finding_text:
+            return "Surgical Procedure"
+        if "imaging_finding" in categories:
+            return "Imaging"
+        visit_types = {(f.visit_type or "").lower() for f in facts}
+        if any("er" in vt or "ed" in vt or "emergency" in vt for vt in visit_types):
+            return "ED Physician"
+        return "Attending"
+    return ""
+
+
 def build_assembly_prompt(
     visit_key: Dict,
     facts: List[VerifiedFact],
@@ -123,4 +190,40 @@ def build_assembly_prompt(
     )
 
 
-__all__ = ["build_assembly_prompt"]
+def build_multi_provider_prompt(
+    visit_key: Dict,
+    provider_groups: Dict[str, List[VerifiedFact]],
+    *,
+    known_credentials: Optional[Dict[str, str]] = None,
+) -> str:
+    """Build prompt for a visit with multiple providers."""
+    creds = known_credentials or {}
+    sections = []
+    for provider_name, pfacts in provider_groups.items():
+        cred = pfacts[0].provider_credentials or ""
+        role = _infer_role(cred, pfacts)
+        sections.append({
+            "provider_name": provider_name,
+            "credential": cred.replace(".", ""),
+            "role": role,
+            "facts": [f.model_dump(mode="json") for f in pfacts],
+        })
+
+    creds_section = ""
+    if creds:
+        creds_section = (
+            "KNOWN_PROVIDER_CREDENTIALS:\n"
+            + json.dumps(creds, indent=2)
+        )
+
+    all_facts = [f for pfacts in provider_groups.values() for f in pfacts]
+    return MULTI_PROVIDER_PROMPT_TEMPLATE.format(
+        visit_key=json.dumps(visit_key, indent=2),
+        provider_sections_json=json.dumps(sections, indent=2),
+        hard_rules=MULTI_PROVIDER_HARD_RULES,
+        known_credentials_section=creds_section,
+        ortho_addendum=ORTHO_ADDENDUM if _is_ortho_visit(visit_key, all_facts) else "",
+    )
+
+
+__all__ = ["build_assembly_prompt", "build_multi_provider_prompt"]
