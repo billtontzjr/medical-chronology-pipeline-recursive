@@ -18,6 +18,11 @@ from typing import Callable, Dict, List, Optional
 
 from src.anthropic_client import AnthropicClient
 from src.assembler import run_assembly
+from src.progress import (
+    CallbackProgressReporter,
+    ConsoleProgressReporter,
+    ProgressReporter,
+)
 from src.cross_checker import (
     CROSS_CHECK_JACCARD_THRESHOLD,
     CrossCheckFailed,
@@ -207,6 +212,7 @@ class PrecisionChronologyPipeline:
         session_id: str,
         progress_callback: Optional[Callable[[str], None]] = None,
         *,
+        progress_reporter: Optional[ProgressReporter] = None,
         model_extraction: Optional[str] = None,
         model_assembly: Optional[str] = None,
         strict_cross_check: bool = False,
@@ -214,20 +220,33 @@ class PrecisionChronologyPipeline:
     ) -> Dict:
         """Run (or resume) the pipeline. Returns a result dict regardless of
         success/pause/failure; callers inspect ``result['status']``.
+
+        Accepts either a ``ProgressReporter`` instance or a legacy
+        ``progress_callback`` callable. If both are provided, the
+        reporter wins.
         """
+        # Resolve reporter: explicit > legacy callback > default console
+        if progress_reporter is not None:
+            reporter = progress_reporter
+        elif progress_callback is not None:
+            reporter = CallbackProgressReporter(progress_callback)
+        else:
+            reporter = ConsoleProgressReporter()
+
         self.store.clear_pause(session_id)
         state = self.store.load(session_id)
         state.status = STATUS_IN_PROGRESS
         state.last_error = None
         self.store.save(state)
 
+        # Legacy cb wrapper for phase runners that still accept Callable
         def cb(msg: str) -> None:
             self.logger.info(msg)
-            if progress_callback:
-                progress_callback(msg)
+            reporter.phase_log(msg)
 
         model_ext = model_extraction or self.model_extraction
         model_asm = model_assembly or self.model_assembly
+        total_phases = len(self.PHASE_LABELS)
 
         phases = [
             (PHASE_DOWNLOAD, self._phase_download),
@@ -250,14 +269,15 @@ class PrecisionChronologyPipeline:
                 self._check_pause(session_id)
                 label = next(lab for name, lab in self.PHASE_LABELS if name == phase_name)
                 if state.phases[phase_name].status == STATUS_COMPLETE:
-                    cb(f"⏭️  Phase {idx}/8: {label} already complete — skipping")
+                    reporter.phase_skipped(idx, total_phases, label)
                     continue
                 self.store.mark_phase(state, phase_name, STATUS_IN_PROGRESS)
-                cb(f"▶️  Phase {idx}/8: {label}")
+                reporter.phase_start(idx, total_phases, label)
                 runner(state, cb)
                 self.store.mark_phase(state, phase_name, STATUS_COMPLETE)
+                reporter.phase_complete(idx)
 
-            cb("✅ Pipeline complete")
+            reporter.pipeline_complete()
             return {
                 "status": "complete",
                 "session_id": session_id,
@@ -265,13 +285,14 @@ class PrecisionChronologyPipeline:
             }
 
         except PauseRequested as exc:
-            cb(f"⏸️  Paused: {exc}")
+            reporter.phase_log(f"⏸️  Paused: {exc}")
             state.status = STATUS_PAUSED
             self.store.save(state)
             return {"status": "paused", "session_id": session_id}
 
         except Exception as exc:  # noqa: BLE001
             self.logger.exception("Pipeline failure")
+            reporter.pipeline_failed(str(exc))
             for ph in state.phases.values():
                 if ph.status == STATUS_IN_PROGRESS:
                     ph.status = STATUS_FAILED
