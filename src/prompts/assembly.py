@@ -64,6 +64,7 @@ HARD RULES:
 - 5 to 7 sentences maximum.
 - If a field (provider credentials, visit type) is missing, omit the placeholder rather than writing "Unknown".
 - If multiple facts conflict, note both versions explicitly without trying to reconcile.
+- Do NOT prefix the provider name with "Provider:" or any label. Write the name directly.
 
 PROVIDER NAME RULES:
 - Always include credentials when any verified fact in this visit group contains them. Format as "First Last, Credential" exactly once at the start of the entry. Never duplicate the credential.

@@ -191,6 +191,9 @@ def run_assembly(
             max_tokens = 4000  # larger output for multi-provider entries
 
         text = anthropic_client.complete(prompt, model=model, max_tokens=max_tokens).strip()
+        # Strip stray "Provider:" prefix the model sometimes adds
+        import re as _re
+        text = _re.sub(r"^Provider:\s*", "", text)
         if not text:
             log.warning("Empty assembly output for visit_key=%s", visit_key)
             continue
