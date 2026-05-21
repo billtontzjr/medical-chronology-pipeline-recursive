@@ -10,6 +10,8 @@ extraction, verification, assembly, cross-check, header+summary.
 from __future__ import annotations
 
 import logging
+import os
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -148,6 +150,56 @@ class PrecisionChronologyPipeline:
     def _check_pause(self, session_id: str) -> None:
         if self._should_pause(session_id):
             raise PauseRequested(f"Pause requested for session {session_id}")
+
+    # -------------------------------------------------------------- background
+    def run_in_background(
+        self,
+        session_id: str,
+        **run_kwargs,
+    ) -> str:
+        """Spawn a daemon thread that runs the pipeline to completion.
+
+        Returns the session_id. The caller can poll ``state.json`` on
+        disk via ``load_session`` to track progress.
+        """
+        import asyncio as _asyncio
+
+        state = self.store.load(session_id)
+        state.runner_pid = os.getpid()
+        state.status = STATUS_IN_PROGRESS
+        self.store.save(state)
+
+        def _target() -> None:
+            try:
+                _asyncio.run(self.run(session_id, **run_kwargs))
+            except Exception:
+                self.logger.exception("Background pipeline thread failed")
+            finally:
+                # Clear runner_pid on completion
+                try:
+                    s = self.store.load(session_id)
+                    s.runner_pid = None
+                    self.store.save(s)
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=_target, daemon=True, name=f"pipeline-{session_id}")
+        t.start()
+        return session_id
+
+    def is_running(self, session_id: str) -> bool:
+        """Check if a background pipeline thread is alive for this session."""
+        try:
+            state = self.store.load(session_id)
+        except FileNotFoundError:
+            return False
+        if state.status != STATUS_IN_PROGRESS:
+            return False
+        if state.runner_pid and state.runner_pid == os.getpid():
+            for t in threading.enumerate():
+                if t.name == f"pipeline-{session_id}" and t.is_alive():
+                    return True
+        return False
 
     # ----------------------------------------------------------------- run
     async def run(

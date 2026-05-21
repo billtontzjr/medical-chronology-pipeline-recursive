@@ -57,6 +57,7 @@ class PhaseState:
     completed_at: Optional[str] = None
     error: Optional[str] = None
     data: Dict = field(default_factory=dict)
+    progress: Optional[Dict] = None  # {"current": int, "total": int, "item": str}
 
 
 @dataclass
@@ -70,6 +71,7 @@ class SessionState:
     status: str = STATUS_IN_PROGRESS
     last_error: Optional[str] = None
     phases: Dict[str, PhaseState] = field(default_factory=dict)
+    runner_pid: Optional[int] = None  # PID of background runner thread/process
 
     @classmethod
     def new(
@@ -101,11 +103,18 @@ class SessionState:
             "status": self.status,
             "last_error": self.last_error,
             "phases": {k: asdict(v) for k, v in self.phases.items()},
+            "runner_pid": self.runner_pid,
         }
 
     @classmethod
     def from_dict(cls, d: Dict) -> "SessionState":
-        phases = {k: PhaseState(**v) for k, v in d.get("phases", {}).items()}
+        raw_phases = d.get("phases", {})
+        phases: Dict[str, PhaseState] = {}
+        for k, v in raw_phases.items():
+            # Backward compat: older state.json files may lack 'progress'
+            v_copy = dict(v)
+            v_copy.setdefault("progress", None)
+            phases[k] = PhaseState(**v_copy)
         for p in PHASE_ORDER:
             phases.setdefault(p, PhaseState())
         return cls(
@@ -118,6 +127,7 @@ class SessionState:
             status=d.get("status", STATUS_IN_PROGRESS),
             last_error=d.get("last_error"),
             phases=phases,
+            runner_pid=d.get("runner_pid"),
         )
 
 
@@ -268,6 +278,19 @@ class SessionStore:
     def update_phase_data(self, state: SessionState, phase: str, data: Dict) -> None:
         p = state.phases.setdefault(phase, PhaseState())
         p.data.update(data)
+        self.save(state)
+
+    def update_phase_progress(
+        self,
+        state: SessionState,
+        phase: str,
+        current: int,
+        total: int,
+        item: str = "",
+    ) -> None:
+        """Persist sub-phase progress (e.g. chunk 5/86, visit 12/251)."""
+        p = state.phases.setdefault(phase, PhaseState())
+        p.progress = {"current": current, "total": total, "item": item}
         self.save(state)
 
     # ----------------------------------------------------------------- pause
