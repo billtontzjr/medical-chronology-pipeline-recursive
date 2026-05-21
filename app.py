@@ -180,6 +180,7 @@ def _render_verification_report(pipeline: PrecisionChronologyPipeline, session_i
                 rej_path.read_bytes(),
                 file_name="verification_rejected.jsonl",
                 mime="application/json",
+                key=f"dl_rejected_{session_id}",
             )
         ccr_path = store.output_dir(session_id) / "cross_check_report.md"
         if ccr_path.exists():
@@ -188,6 +189,7 @@ def _render_verification_report(pipeline: PrecisionChronologyPipeline, session_i
                 ccr_path.read_bytes(),
                 file_name="cross_check_report.md",
                 mime="text/markdown",
+                key=f"dl_crosscheck_{session_id}",
             )
 
 
@@ -208,6 +210,7 @@ def _render_outputs(pipeline: PrecisionChronologyPipeline, session_id: str) -> N
         buf.getvalue(),
         file_name=f"{session_id}_outputs.zip",
         mime="application/zip",
+        key=f"dl_zip_{session_id}",
     )
 
     tabs = st.tabs([f.name for f in files])
