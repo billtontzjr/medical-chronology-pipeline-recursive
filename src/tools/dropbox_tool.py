@@ -438,10 +438,19 @@ class DropboxTool:
             results['success'] = False
             results['error'] = str(e)
 
-        # If some files failed but we didn't hit a global error, add summary
+        # If some files failed but we didn't hit a global error, add summary.
+        # Surface the actual exception reasons (deduplicated) — when every file
+        # fails it is almost always one systemic cause (auth scope, team
+        # path-root, rate limiting), and the reason is what we need to debug.
         if not results['success'] and 'error' not in results and results['failed']:
-            failed_files = ', '.join([f['name'] for f in results['failed']])
-            results['error'] = f"Failed to download {len(results['failed'])} files: {failed_files}"
+            reasons = {}
+            for f in results['failed']:
+                reasons[f.get('error', 'unknown error')] = reasons.get(f.get('error', 'unknown error'), 0) + 1
+            reason_summary = '; '.join(f"{r} (x{n})" for r, n in reasons.items())
+            results['error'] = (
+                f"Failed to download {len(results['failed'])} files. "
+                f"Reason(s): {reason_summary}"
+            )
 
         return results
 

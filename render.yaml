@@ -21,7 +21,14 @@ services:
     # ephemeral root filesystem and the disk fills quickly under real workloads
     # (ENOSPC). The orchestrator also auto-prunes the oldest completed sessions
     # when usage tops 70%, so this size should comfortably hold months of work.
+    # NOTE: Render does NOT resize an already-created disk when this value
+    # changes — you must also grow it in the dashboard (Settings → Disks).
+    # Medical/legal case folders run several GB each (input PDFs + OCR text +
+    # extracted facts + outputs all live here), so size generously.
+    # mountPath must match the live disk (/app/data). The app writes sessions
+    # to /app/data/sessions, a subfolder of this mount. Do NOT change mountPath
+    # on an existing service — Render recreates the disk and DESTROYS its data.
     disk:
       name: sessions
-      mountPath: /app/data/sessions
-      sizeGB: 5
+      mountPath: /app/data
+      sizeGB: 50

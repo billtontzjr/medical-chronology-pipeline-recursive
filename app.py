@@ -238,9 +238,14 @@ def _new_run_tab(pipeline: PrecisionChronologyPipeline) -> None:
     col1, col2 = st.columns(2)
     with col1:
         dropbox_link = st.text_input(
-            "Dropbox shared link",
+            "Dropbox folder path or shared link",
             value=st.session_state.get("last_link", ""),
-            placeholder="https://www.dropbox.com/scl/fi/...",
+            placeholder="/McKnight case",
+            help=(
+                "For folders in your own Dropbox, paste the folder PATH "
+                "(e.g. /McKnight case) — this is the most reliable. Shared "
+                "link URLs also work but can fail on some accounts."
+            ),
         )
         patient_id = st.text_input(
             "Patient ID (optional)", value=st.session_state.get("last_patient", "")
