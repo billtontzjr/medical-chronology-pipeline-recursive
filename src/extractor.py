@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -143,11 +144,50 @@ def _stamp_facts(
     )
 
 
-def _atomic_write_json(path: Path, payload: Dict) -> None:
+def _atomic_write_json(path: Path, payload: Dict, *, max_attempts: int = 3) -> None:
+    """Write ``payload`` to ``path`` atomically.
+
+    Production hardening: in ephemeral container environments (e.g. Render
+    without a persistent disk) we have seen ``os.replace`` raise
+    ``FileNotFoundError`` because the ``.tmp`` disappears between the
+    write and the rename. We retry up to ``max_attempts`` times after
+    re-ensuring the parent directory exists, then fall back to a direct
+    in-place write so a single chunk's persist never kills the whole
+    phase. The final fsync makes the write durable before rename.
+    """
+    log = logging.getLogger(__name__)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-    os.replace(tmp, path)
+    data = json.dumps(payload, indent=2)
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(data)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass  # not all filesystems support fsync
+            os.replace(tmp, path)
+            return
+        except FileNotFoundError as exc:
+            log.warning(
+                "Atomic write race on %s (attempt %d/%d): %s",
+                path.name,
+                attempt,
+                max_attempts,
+                exc,
+            )
+            if attempt >= max_attempts:
+                # Final fallback: write directly to the target. We lose the
+                # atomicity guarantee but we keep the chunk's data instead
+                # of dropping it.
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(data)
+                return
+            time.sleep(0.1 * attempt)
 
 
 def run_extraction(
@@ -182,6 +222,7 @@ def run_extraction(
         chunks_total=0,
         chunks_extracted=0,
         chunks_skipped=0,
+        chunks_failed_transient=0,
         facts_emitted=0,
     )
 
@@ -218,51 +259,73 @@ def run_extraction(
                     f"Extraction: {piece.chunk_id} (chars {piece.start_char}-{piece.end_char})"
                 )
 
-            prompt = build_extraction_prompt(
-                chunk_text=piece.text,
-                source_file=stem,
-                chunk_id=piece.chunk_id,
-                chunk_start_char=piece.start_char,
-                chunk_end_char=piece.end_char,
-            )
-            raw = anthropic_client.complete(prompt, model=model, max_tokens=8000)
-            cleaned = _strip_md_fence(raw)
-
+            # Per-chunk isolation: one bad chunk (transient OS error,
+            # network blip, malformed model output) must NOT kill the
+            # whole phase. The chunk's JSON is simply not written, so
+            # the next Resume picks it up via the existing skip-if-present
+            # check at the top of this loop.
             try:
-                parsed = ChunkExtraction.model_validate_json(cleaned)
-            except ValidationError as exc:
-                log.error("Validation failed for %s: %s", piece.chunk_id, exc)
-                # Persist an empty-facts record so we don't retry forever.
-                empty = ChunkExtraction(
+                prompt = build_extraction_prompt(
+                    chunk_text=piece.text,
                     source_file=stem,
                     chunk_id=piece.chunk_id,
                     chunk_start_char=piece.start_char,
                     chunk_end_char=piece.end_char,
-                    facts=[],
-                    extraction_notes=f"validation_error: {exc.errors()[:3]}",
                 )
-                _atomic_write_json(out_path, empty.model_dump(mode="json"))
-                summary["chunks_extracted"] += 1
-                continue
+                raw = anthropic_client.complete(prompt, model=model, max_tokens=8000)
+                cleaned = _strip_md_fence(raw)
 
-            stamped = _stamp_facts(
-                parsed,
-                source_file_stem=stem,
-                chunk_id=piece.chunk_id,
-                full_text=full_text,
-                chunk_start=piece.start_char,
-                chunk_end=piece.end_char,
-            )
-            _atomic_write_json(out_path, stamped.model_dump(mode="json"))
-            summary["chunks_extracted"] += 1
-            summary["facts_emitted"] += len(stamped.facts)
+                try:
+                    parsed = ChunkExtraction.model_validate_json(cleaned)
+                except ValidationError as exc:
+                    log.error("Validation failed for %s: %s", piece.chunk_id, exc)
+                    # Persist an empty-facts record so we don't retry forever.
+                    empty = ChunkExtraction(
+                        source_file=stem,
+                        chunk_id=piece.chunk_id,
+                        chunk_start_char=piece.start_char,
+                        chunk_end_char=piece.end_char,
+                        facts=[],
+                        extraction_notes=f"validation_error: {exc.errors()[:3]}",
+                    )
+                    _atomic_write_json(out_path, empty.model_dump(mode="json"))
+                    summary["chunks_extracted"] += 1
+                    continue
+
+                stamped = _stamp_facts(
+                    parsed,
+                    source_file_stem=stem,
+                    chunk_id=piece.chunk_id,
+                    full_text=full_text,
+                    chunk_start=piece.start_char,
+                    chunk_end=piece.end_char,
+                )
+                _atomic_write_json(out_path, stamped.model_dump(mode="json"))
+                summary["chunks_extracted"] += 1
+                summary["facts_emitted"] += len(stamped.facts)
+            except Exception as exc:  # noqa: BLE001
+                log.exception(
+                    "Transient failure on chunk %s; will retry on next resume",
+                    piece.chunk_id,
+                )
+                summary["chunks_failed_transient"] += 1
+                if progress_callback:
+                    progress_callback(
+                        f"Extraction: {piece.chunk_id} failed transiently "
+                        f"({type(exc).__name__}); will retry on next resume"
+                    )
 
     if progress_callback:
-        progress_callback(
+        msg = (
             f"Extraction complete: {summary['facts_emitted']} facts from "
             f"{summary['chunks_extracted']} chunk(s) "
             f"(+{summary['chunks_skipped']} resumed)"
         )
+        if summary["chunks_failed_transient"]:
+            msg += (
+                f" — {summary['chunks_failed_transient']} chunk(s) deferred to next resume"
+            )
+        progress_callback(msg)
 
     return summary
 
