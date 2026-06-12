@@ -320,7 +320,19 @@ class DropboxTool:
         Returns:
             Dictionary with download results
         """
-        # Parse URL and convert to path if needed
+        # Anything that is NOT an http(s) URL is a Dropbox folder path —
+        # including a bare folder name like "McKnight case" (no leading slash).
+        # Treat it as a path so it routes to the reliable files_download API
+        # instead of silently falling through to the shared-link API (which
+        # fails with shared_link_not_found). The leading slash is no longer
+        # load-bearing.
+        raw = (shared_link or "").strip()
+        if not (raw.startswith("http://") or raw.startswith("https://")):
+            path = normalize_dropbox_folder(raw)
+            if path:
+                return self.download_folder(path, local_dir, extensions)
+
+        # Parse URL and convert to path if needed (handles /home/... URLs)
         parsed_path = self._parse_dropbox_url(shared_link)
 
         # Check if this is a direct path (starts with /) instead of a URL
