@@ -113,6 +113,22 @@ class PrecisionChronologyPipeline:
         patient_id: Optional[str],
         destination_folder: Optional[str] = None,
     ) -> SessionState:
+        # Opportunistic disk cleanup BEFORE allocating a new session's
+        # directory. If the disk is more than 70% full, prune the oldest
+        # completed sessions until it drops below 50%. Failed and
+        # in-progress sessions are never auto-pruned. This is the
+        # backstop against ENOSPC errors on the container disk.
+        try:
+            pruned = self.store.prune_completed_sessions()
+            if pruned:
+                self.logger.info(
+                    "create_session: auto-pruned %d completed session(s) to free disk: %s",
+                    len(pruned),
+                    pruned,
+                )
+        except Exception:  # noqa: BLE001
+            self.logger.exception("create_session: prune_completed_sessions failed")
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         session_id = f"{patient_id}_{timestamp}" if patient_id else timestamp
         destination = normalize_dropbox_folder(

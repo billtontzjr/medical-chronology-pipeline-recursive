@@ -307,8 +307,32 @@ def _render_session_progress(sess) -> None:
             st.write(f"⏳ Phase {i+1}/8: {label} — pending")
 
 
+def _render_disk_gauge(pipeline: PrecisionChronologyPipeline) -> None:
+    try:
+        total, used, free = pipeline.store.disk_usage()
+    except Exception:
+        return
+    used_gb = used / (1024 ** 3)
+    total_gb = total / (1024 ** 3)
+    pct = used / total if total else 0.0
+    if pct >= 0.85:
+        st.error(
+            f"Disk: {used_gb:.2f} / {total_gb:.2f} GB used ({pct * 100:.0f}%). "
+            "Auto-prune triggers at 70% and runs on the next New Run; "
+            "consider deleting old sessions manually below."
+        )
+    elif pct >= 0.70:
+        st.warning(
+            f"Disk: {used_gb:.2f} / {total_gb:.2f} GB used ({pct * 100:.0f}%). "
+            "Auto-prune will free space on your next New Run."
+        )
+    else:
+        st.caption(f"Disk: {used_gb:.2f} / {total_gb:.2f} GB used ({pct * 100:.0f}%)")
+
+
 def _sessions_tab(pipeline: PrecisionChronologyPipeline) -> None:
     st.subheader("Sessions")
+    _render_disk_gauge(pipeline)
     sessions = pipeline.list_sessions()
     if not sessions:
         st.info("No sessions yet. Start one in the New Run tab.")

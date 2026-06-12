@@ -20,7 +20,7 @@ import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 
 PHASE_DOWNLOAD = "download"
@@ -243,6 +243,68 @@ class SessionStore:
         d = self.sessions_root / session_id
         if d.exists():
             shutil.rmtree(d)
+
+    # ------------------------------------------------------------- disk mgmt
+    def disk_usage(self) -> Tuple[int, int, int]:
+        """Return ``(total, used, free)`` bytes for the sessions filesystem.
+
+        Falls back to the base dir if ``sessions_root`` doesn't exist yet.
+        """
+        import shutil
+
+        target = self.sessions_root if self.sessions_root.exists() else self.base_dir
+        u = shutil.disk_usage(str(target))
+        return u.total, u.used, u.free
+
+    def disk_used_fraction(self) -> float:
+        total, used, _ = self.disk_usage()
+        if total <= 0:
+            return 0.0
+        return used / total
+
+    def prune_completed_sessions(
+        self,
+        *,
+        high_water: float = 0.70,
+        low_water: float = 0.50,
+        keep_minimum: int = 1,
+        dry_run: bool = False,
+    ) -> List[str]:
+        """Free disk when usage gets uncomfortably high.
+
+        When ``disk_used_fraction`` exceeds ``high_water``, delete the
+        oldest completed sessions one by one until usage drops below
+        ``low_water`` or only ``keep_minimum`` completed sessions remain.
+
+        Failed/paused/in-progress sessions are NEVER pruned automatically.
+        Use the explicit ``delete`` method for those.
+
+        Returns the list of session_ids that were deleted.
+        """
+        used_frac = self.disk_used_fraction()
+        if used_frac <= high_water:
+            return []
+
+        sessions = self.list_sessions()
+        completed = sorted(
+            [s for s in sessions if s.status == STATUS_COMPLETE],
+            key=lambda s: s.updated_at,
+        )  # oldest first
+
+        if len(completed) <= keep_minimum:
+            return []
+
+        deleted: List[str] = []
+        for sess in completed[:-keep_minimum]:
+            if self.disk_used_fraction() <= low_water:
+                break
+            if not dry_run:
+                try:
+                    self.delete(sess.session_id)
+                except Exception:
+                    continue
+            deleted.append(sess.session_id)
+        return deleted
 
     # ---------------------------------------------------------------- phases
     def mark_phase(
