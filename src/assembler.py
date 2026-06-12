@@ -24,11 +24,23 @@ from src.anthropic_client import AnthropicClient
 from src.prompts.assembly import build_assembly_prompt, build_multi_provider_prompt
 from src.schemas import VerifiedFact
 from src.session_state import SessionStore
+from src.token_budget import SAFE_PROMPT_CHARS
 
 
 UNKNOWN_PLACEHOLDER = "Unknown"
 HEADER_PLACEHOLDER = "<<HEADER_PLACEHOLDER>>"
 UNDATED_HEADING = "## Undated Entries"
+
+# Hard cap on facts handed to Claude for a single visit group. Chunk
+# overlap in extraction can produce duplicate facts; we dedupe first,
+# but if the remaining count is still pathological (e.g. a giant
+# undated bucket on a massive record set) we cap to this many facts
+# to keep the prompt within budget.
+MAX_FACTS_PER_VISIT_GROUP = 250
+
+# Approximate chars per serialized VerifiedFact in JSON. Used to
+# preflight the prompt size; real char count is measured by build_*.
+APPROX_CHARS_PER_FACT = 600
 
 
 # Consolidated key: (visit_date, facility, visit_type)
@@ -86,6 +98,70 @@ def _load_verified(jsonl_path: Path) -> List[VerifiedFact]:
     return facts
 
 
+def _dedupe_facts(facts: List[VerifiedFact]) -> List[VerifiedFact]:
+    """Drop facts that duplicate another fact on the same visit.
+
+    Chunks overlap by 800 chars, so facts sitting near a chunk boundary
+    can appear in two adjacent chunks. We treat two facts as duplicates
+    when they share visit_date, facility (case-insensitive), provider
+    name (case-insensitive), finding_text (case-insensitive), and
+    verbatim_quote (case-insensitive). Order is preserved.
+    """
+    seen: set = set()
+    out: List[VerifiedFact] = []
+    for f in facts:
+        key = (
+            f.visit_date or "",
+            (f.facility or "").lower(),
+            (f.provider_name or "").lower(),
+            (f.finding_text or "").lower(),
+            (f.verbatim_quote or "").lower(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f)
+    return out
+
+
+def _cap_visit_facts(
+    facts: List[VerifiedFact],
+    *,
+    max_facts: int = MAX_FACTS_PER_VISIT_GROUP,
+    max_chars: int = SAFE_PROMPT_CHARS // 2,
+) -> Tuple[List[VerifiedFact], bool]:
+    """Cap a single visit group's facts so the assembly prompt cannot
+    exceed the token budget.
+
+    Strategy: keep a diverse sample by walking facts in order and
+    skipping any whose (provider, category, finding_text) signature has
+    already been seen. Stop when either ``max_facts`` is reached or the
+    cumulative char-cost crosses ``max_chars``.
+    """
+    if len(facts) <= max_facts:
+        approx_total = sum(len(f.verbatim_quote or "") + APPROX_CHARS_PER_FACT for f in facts)
+        if approx_total <= max_chars:
+            return facts, False
+
+    seen_signature: set = set()
+    kept: List[VerifiedFact] = []
+    total_chars = 0
+    for f in facts:
+        sig = (
+            (f.provider_name or "").lower(),
+            f.fact_category,
+            (f.finding_text or "")[:120].lower(),
+        )
+        if sig in seen_signature:
+            continue
+        seen_signature.add(sig)
+        kept.append(f)
+        total_chars += len(f.verbatim_quote or "") + APPROX_CHARS_PER_FACT
+        if len(kept) >= max_facts or total_chars >= max_chars:
+            break
+    return kept, True
+
+
 _CREDENTIAL_TOKENS = [
     "pa-c", "dpt", "pharmd", "psyd",
     "md", "do", "pa", "np", "rn", "pt", "od", "dc", "dpm", "fnp",
@@ -141,7 +217,15 @@ def run_assembly(
     replaces with the patient header once it is known.
     """
     log = logging.getLogger(__name__)
-    facts = _load_verified(session_store.verified_facts_path(session_id))
+    raw_facts = _load_verified(session_store.verified_facts_path(session_id))
+
+    # Dedupe across the whole session before grouping. Chunk overlap can
+    # produce 2x duplicates per fact; on big record sets this is the
+    # difference between a sane prompt and an over-budget one.
+    facts = _dedupe_facts(raw_facts)
+    duplicates_dropped = len(raw_facts) - len(facts)
+    if duplicates_dropped:
+        log.info("Assembly: dropped %d duplicate facts after dedup", duplicates_dropped)
 
     groups: Dict[ConsolidatedVisitKey, List[VerifiedFact]] = defaultdict(list)
     for fact in facts:
@@ -154,7 +238,8 @@ def run_assembly(
 
     if progress_callback:
         progress_callback(
-            f"Assembly: {len(facts)} verified facts in {len(ordered_keys)} visit group(s)"
+            f"Assembly: {len(facts)} verified facts "
+            f"(deduped from {len(raw_facts)}) in {len(ordered_keys)} visit group(s)"
         )
 
     entries: List[str] = []
@@ -167,7 +252,19 @@ def run_assembly(
             facility = visit_key.get("facility") or "Unknown"
             progress_callback(f"Assembly: {idx}/{len(ordered_keys)} {label} {facility}")
 
-        visit_facts = groups[key]
+        visit_facts, was_capped = _cap_visit_facts(groups[key])
+        if was_capped:
+            log.warning(
+                "Assembly: visit %s capped from %d to %d facts to stay under token budget",
+                key,
+                len(groups[key]),
+                len(visit_facts),
+            )
+            if progress_callback:
+                progress_callback(
+                    f"Assembly: capped {key[0] or '(undated)'} {key[1]} "
+                    f"from {len(groups[key])} -> {len(visit_facts)} facts"
+                )
         provider_groups = _sub_group_by_provider(visit_facts)
         unique_providers = [
             p for p in provider_groups if p != UNKNOWN_PLACEHOLDER
