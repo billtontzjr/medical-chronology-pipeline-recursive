@@ -176,9 +176,13 @@ def _set_default_font(doc: Document) -> None:
         font.size = Pt(12)
 
 
-def _add_justified_paragraph(doc: Document, text: str) -> None:
+def _add_body_paragraph(doc: Document, text: str) -> None:
+    # Left-aligned (ragged right), NOT justified. Justification stretches the
+    # space between words to fill the line, which on short lines — e.g. a
+    # provider heading like "Yphantides, Theophilos, MD - Attending:" — blows
+    # the words apart into huge gaps. Left alignment reads cleanly.
     p = doc.add_paragraph(text)
-    p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
     p.paragraph_format.line_spacing = 1.0
     p.paragraph_format.space_after = Pt(6)
 
@@ -218,7 +222,7 @@ def render_chronology_docx(
             p.alignment = WD_ALIGN_PARAGRAPH.LEFT
             continue
         clean = para.replace("—", ",")  # em-dash → comma (defensive)
-        _add_justified_paragraph(doc, clean)
+        _add_body_paragraph(doc, clean)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))
