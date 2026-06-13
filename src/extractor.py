@@ -17,7 +17,9 @@ import json
 import logging
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -32,6 +34,12 @@ from src.session_state import SessionStore
 
 CHUNK_SIZE = 8000
 CHUNK_OVERLAP = 800
+
+# Chunks are independent and each persists its own JSON file, so the Claude
+# calls can run concurrently. The Anthropic client uses a 10-connection pool
+# with built-in 429/overload backoff, so 8 workers stays comfortably under it.
+# Override with the EXTRACTION_WORKERS env var.
+EXTRACTION_WORKERS = max(1, int(os.environ.get("EXTRACTION_WORKERS", "8")))
 
 PAGE_MARK_RE = re.compile(r"^=== PAGE (\d+) ===$", re.MULTILINE)
 MD_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
@@ -227,93 +235,117 @@ def run_extraction(
     )
 
     if progress_callback:
-        progress_callback(f"Extraction: {len(text_files)} OCR file(s) found")
+        progress_callback(
+            f"Extraction: {len(text_files)} OCR file(s) found "
+            f"(parallel x{EXTRACTION_WORKERS})"
+        )
 
+    summary_lock = threading.Lock()
+
+    def _bump(**counts: int) -> None:
+        with summary_lock:
+            for key, val in counts.items():
+                summary[key] += val
+
+    def _extract_one_chunk(piece: Chunk, stem: str, full_text: str) -> None:
+        """Call Claude for one chunk and persist it.
+
+        Per-chunk isolation: one bad chunk (transient OS error, network
+        blip, malformed model output) must NOT kill the whole phase. The
+        chunk's JSON is simply not written, so the next Resume picks it up
+        via the skip-if-present check.
+        """
+        out_path = facts_dir / f"{piece.chunk_id}.json"
+        try:
+            prompt = build_extraction_prompt(
+                chunk_text=piece.text,
+                source_file=stem,
+                chunk_id=piece.chunk_id,
+                chunk_start_char=piece.start_char,
+                chunk_end_char=piece.end_char,
+            )
+            raw = anthropic_client.complete(prompt, model=model, max_tokens=8000)
+            cleaned = _strip_md_fence(raw)
+
+            try:
+                parsed = ChunkExtraction.model_validate_json(cleaned)
+            except ValidationError as exc:
+                log.error("Validation failed for %s: %s", piece.chunk_id, exc)
+                # Persist an empty-facts record so we don't retry forever.
+                empty = ChunkExtraction(
+                    source_file=stem,
+                    chunk_id=piece.chunk_id,
+                    chunk_start_char=piece.start_char,
+                    chunk_end_char=piece.end_char,
+                    facts=[],
+                    extraction_notes=f"validation_error: {exc.errors()[:3]}",
+                )
+                _atomic_write_json(out_path, empty.model_dump(mode="json"))
+                _bump(chunks_extracted=1)
+                return
+
+            stamped = _stamp_facts(
+                parsed,
+                source_file_stem=stem,
+                chunk_id=piece.chunk_id,
+                full_text=full_text,
+                chunk_start=piece.start_char,
+                chunk_end=piece.end_char,
+            )
+            _atomic_write_json(out_path, stamped.model_dump(mode="json"))
+            _bump(chunks_extracted=1, facts_emitted=len(stamped.facts))
+        except Exception as exc:  # noqa: BLE001
+            log.exception(
+                "Transient failure on chunk %s; will retry on next resume",
+                piece.chunk_id,
+            )
+            _bump(chunks_failed_transient=1)
+            if progress_callback:
+                progress_callback(
+                    f"Extraction: {piece.chunk_id} failed transiently "
+                    f"({type(exc).__name__}); will retry on next resume"
+                )
+
+    # Process one file at a time (bounds memory to a single file's OCR text)
+    # but fan its pending chunks out across a thread pool. Already-extracted
+    # chunks are counted and skipped without an API call (resume).
     for text_path in text_files:
         stem = text_path.stem  # e.g. "record_001"
         with open(text_path, "r", encoding="utf-8") as f:
             full_text = f.read()
         pieces = chunk_text(full_text, chunk_size=chunk_size, overlap=overlap, stem=stem)
-        summary["files_processed"] += 1
-        summary["chunks_total"] += len(pieces)
+        _bump(files_processed=1, chunks_total=len(pieces))
 
+        pending: List[Chunk] = []
         for piece in pieces:
             out_path = facts_dir / f"{piece.chunk_id}.json"
             if out_path.exists():
-                summary["chunks_skipped"] += 1
-                if progress_callback:
-                    progress_callback(
-                        f"Extraction: skip {piece.chunk_id} (already present)"
-                    )
-                # Count facts in the existing file
+                _bump(chunks_skipped=1)
                 try:
                     with open(out_path, "r", encoding="utf-8") as f:
                         existing = json.load(f)
-                    summary["facts_emitted"] += len(existing.get("facts", []))
+                    _bump(facts_emitted=len(existing.get("facts", [])))
                 except Exception:
                     pass
                 continue
+            pending.append(piece)
 
-            if progress_callback:
-                progress_callback(
-                    f"Extraction: {piece.chunk_id} (chars {piece.start_char}-{piece.end_char})"
-                )
+        if not pending:
+            continue
 
-            # Per-chunk isolation: one bad chunk (transient OS error,
-            # network blip, malformed model output) must NOT kill the
-            # whole phase. The chunk's JSON is simply not written, so
-            # the next Resume picks it up via the existing skip-if-present
-            # check at the top of this loop.
-            try:
-                prompt = build_extraction_prompt(
-                    chunk_text=piece.text,
-                    source_file=stem,
-                    chunk_id=piece.chunk_id,
-                    chunk_start_char=piece.start_char,
-                    chunk_end_char=piece.end_char,
-                )
-                raw = anthropic_client.complete(prompt, model=model, max_tokens=8000)
-                cleaned = _strip_md_fence(raw)
+        if progress_callback:
+            progress_callback(
+                f"Extraction: {stem}: {len(pending)} chunk(s) "
+                f"({len(pieces) - len(pending)} already done)"
+            )
 
-                try:
-                    parsed = ChunkExtraction.model_validate_json(cleaned)
-                except ValidationError as exc:
-                    log.error("Validation failed for %s: %s", piece.chunk_id, exc)
-                    # Persist an empty-facts record so we don't retry forever.
-                    empty = ChunkExtraction(
-                        source_file=stem,
-                        chunk_id=piece.chunk_id,
-                        chunk_start_char=piece.start_char,
-                        chunk_end_char=piece.end_char,
-                        facts=[],
-                        extraction_notes=f"validation_error: {exc.errors()[:3]}",
-                    )
-                    _atomic_write_json(out_path, empty.model_dump(mode="json"))
-                    summary["chunks_extracted"] += 1
-                    continue
-
-                stamped = _stamp_facts(
-                    parsed,
-                    source_file_stem=stem,
-                    chunk_id=piece.chunk_id,
-                    full_text=full_text,
-                    chunk_start=piece.start_char,
-                    chunk_end=piece.end_char,
-                )
-                _atomic_write_json(out_path, stamped.model_dump(mode="json"))
-                summary["chunks_extracted"] += 1
-                summary["facts_emitted"] += len(stamped.facts)
-            except Exception as exc:  # noqa: BLE001
-                log.exception(
-                    "Transient failure on chunk %s; will retry on next resume",
-                    piece.chunk_id,
-                )
-                summary["chunks_failed_transient"] += 1
-                if progress_callback:
-                    progress_callback(
-                        f"Extraction: {piece.chunk_id} failed transiently "
-                        f"({type(exc).__name__}); will retry on next resume"
-                    )
+        with ThreadPoolExecutor(max_workers=EXTRACTION_WORKERS) as pool:
+            futures = [
+                pool.submit(_extract_one_chunk, piece, stem, full_text)
+                for piece in pending
+            ]
+            for fut in as_completed(futures):
+                fut.result()  # _extract_one_chunk swallows its own errors
 
     if progress_callback:
         msg = (

@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -25,6 +28,11 @@ from src.prompts.assembly import build_assembly_prompt, build_multi_provider_pro
 from src.schemas import VerifiedFact
 from src.session_state import SessionStore
 from src.token_budget import SAFE_PROMPT_CHARS
+
+# Each visit group's narration is an independent Claude call; only the final
+# file ordering matters, which we preserve by mapping results back by index.
+# Override with the ASSEMBLY_WORKERS env var.
+ASSEMBLY_WORKERS = max(1, int(os.environ.get("ASSEMBLY_WORKERS", "8")))
 
 
 UNKNOWN_PLACEHOLDER = "Unknown"
@@ -242,59 +250,90 @@ def run_assembly(
             f"(deduped from {len(raw_facts)}) in {len(ordered_keys)} visit group(s)"
         )
 
+    def _assemble_one(
+        idx: int, key: ConsolidatedVisitKey
+    ) -> Tuple[int, ConsolidatedVisitKey, str]:
+        """Narrate one visit group via Claude. Returns (idx, key, text).
+
+        Resilient: a single group that fails (after the client's own
+        retries) is logged and omitted rather than killing the phase.
+        """
+        visit_key = _consolidated_key_to_dict(key)
+        try:
+            visit_facts, was_capped = _cap_visit_facts(groups[key])
+            if was_capped:
+                log.warning(
+                    "Assembly: visit %s capped from %d to %d facts to stay under token budget",
+                    key,
+                    len(groups[key]),
+                    len(visit_facts),
+                )
+            provider_groups = _sub_group_by_provider(visit_facts)
+            unique_providers = [
+                p for p in provider_groups if p != UNKNOWN_PLACEHOLDER
+            ]
+
+            if len(unique_providers) <= 1:
+                # Single provider or all unknown: standard single-paragraph prompt
+                sample = visit_facts[0]
+                single_key = dict(visit_key)
+                single_key["provider_name"] = sample.provider_name
+                single_key["provider_credentials"] = sample.provider_credentials
+                prompt = build_assembly_prompt(
+                    single_key, visit_facts, known_credentials=credential_lookup
+                )
+                max_tokens = 2000
+            else:
+                # Multiple providers: use multi-provider prompt
+                prompt = build_multi_provider_prompt(
+                    visit_key, provider_groups, known_credentials=credential_lookup
+                )
+                max_tokens = 4000  # larger output for multi-provider entries
+
+            text = anthropic_client.complete(
+                prompt, model=model, max_tokens=max_tokens
+            ).strip()
+            # Strip stray "Provider:" prefix the model sometimes adds
+            text = re.sub(r"^Provider:\s*", "", text)
+            return idx, key, text
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "Assembly failed for visit_key=%s; entry omitted", visit_key
+            )
+            return idx, key, ""
+
+    # Fan visit groups out across a thread pool, then reassemble strictly in
+    # sorted order so the chronology still reads chronologically regardless of
+    # which call returned first.
+    results: Dict[int, Tuple[ConsolidatedVisitKey, str]] = {}
+    total_groups = len(ordered_keys)
+    completed = 0
+    with ThreadPoolExecutor(max_workers=ASSEMBLY_WORKERS) as pool:
+        futures = [
+            pool.submit(_assemble_one, idx, key)
+            for idx, key in enumerate(ordered_keys, start=1)
+        ]
+        for fut in as_completed(futures):
+            idx, key, text = fut.result()
+            completed += 1
+            if progress_callback and (completed % 10 == 0 or completed == total_groups):
+                progress_callback(
+                    f"Assembly: {completed}/{total_groups} visit entries narrated"
+                )
+            if not text:
+                log.warning(
+                    "Empty assembly output for visit_key=%s",
+                    _consolidated_key_to_dict(key),
+                )
+                continue
+            results[idx] = (key, text)
+
     entries: List[str] = []
     undated_entries: List[str] = []
-
-    for idx, key in enumerate(ordered_keys, start=1):
-        visit_key = _consolidated_key_to_dict(key)
-        if progress_callback:
-            label = visit_key.get("visit_date") or "(undated)"
-            facility = visit_key.get("facility") or "Unknown"
-            progress_callback(f"Assembly: {idx}/{len(ordered_keys)} {label} {facility}")
-
-        visit_facts, was_capped = _cap_visit_facts(groups[key])
-        if was_capped:
-            log.warning(
-                "Assembly: visit %s capped from %d to %d facts to stay under token budget",
-                key,
-                len(groups[key]),
-                len(visit_facts),
-            )
-            if progress_callback:
-                progress_callback(
-                    f"Assembly: capped {key[0] or '(undated)'} {key[1]} "
-                    f"from {len(groups[key])} -> {len(visit_facts)} facts"
-                )
-        provider_groups = _sub_group_by_provider(visit_facts)
-        unique_providers = [
-            p for p in provider_groups if p != UNKNOWN_PLACEHOLDER
-        ]
-
-        if len(unique_providers) <= 1:
-            # Single provider or all unknown: use standard single-paragraph prompt
-            sample = visit_facts[0]
-            single_key = dict(visit_key)
-            single_key["provider_name"] = sample.provider_name
-            single_key["provider_credentials"] = sample.provider_credentials
-            prompt = build_assembly_prompt(
-                single_key, visit_facts, known_credentials=credential_lookup
-            )
-            max_tokens = 2000
-        else:
-            # Multiple providers: use multi-provider prompt
-            prompt = build_multi_provider_prompt(
-                visit_key, provider_groups, known_credentials=credential_lookup
-            )
-            max_tokens = 4000  # larger output for multi-provider entries
-
-        text = anthropic_client.complete(prompt, model=model, max_tokens=max_tokens).strip()
-        # Strip stray "Provider:" prefix the model sometimes adds
-        import re as _re
-        text = _re.sub(r"^Provider:\s*", "", text)
-        if not text:
-            log.warning("Empty assembly output for visit_key=%s", visit_key)
+    for idx in range(1, total_groups + 1):
+        if idx not in results:
             continue
-
+        key, text = results[idx]
         if key[0]:
             entries.append(text)
         else:
