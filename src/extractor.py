@@ -17,7 +17,6 @@ import json
 import logging
 import os
 import re
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -29,7 +28,21 @@ from pydantic import ValidationError
 from src.anthropic_client import AnthropicClient
 from src.prompts.extraction import build_extraction_prompt
 from src.schemas import ChunkExtraction, ExtractedFact
-from src.session_state import SessionStore
+from src.session_state import PHASE_EXTRACTION, SessionStore
+
+
+def _report_progress(session_store, state, phase, current, total, item="") -> None:
+    """Persist sub-phase progress to state.json if a state object was passed.
+
+    Best-effort: a progress-write failure must never interrupt a phase.
+    Called only from the main thread (single writer to state.json).
+    """
+    if state is None or session_store is None:
+        return
+    try:
+        session_store.update_phase_progress(state, phase, current, total, item)
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).debug("progress write failed", exc_info=True)
 
 
 CHUNK_SIZE = 8000
@@ -123,18 +136,18 @@ def _stamp_facts(
     parsed: ChunkExtraction,
     source_file_stem: str,
     chunk_id: str,
-    full_text: str,
+    page: int,
     chunk_start: int,
     chunk_end: int,
 ) -> ChunkExtraction:
     """Stamp identity + source_page on each fact, overriding model mistakes.
 
     The model is told the source_file and chunk_id explicitly but
-    sometimes echoes them imperfectly. We re-stamp them, and we compute
-    ``source_page`` from the chunk start offset since the model cannot
-    see the page marker reliably outside its chunk.
+    sometimes echoes them imperfectly. We re-stamp them, and we set
+    ``source_page`` from ``page`` (precomputed by the caller via
+    :func:`page_for_offset` while it still had the full text) since the
+    model cannot see the page marker reliably outside its chunk.
     """
-    page = page_for_offset(full_text, chunk_start)
     fixed: List[ExtractedFact] = []
     for fact in parsed.facts:
         fixed_data = fact.model_dump()
@@ -203,12 +216,20 @@ def run_extraction(
     session_id: str,
     anthropic_client: AnthropicClient,
     *,
+    state=None,
     model: Optional[str] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
     chunk_size: int = CHUNK_SIZE,
     overlap: int = CHUNK_OVERLAP,
 ) -> Dict:
     """Run extraction over every OCR text file in the session.
+
+    All pending chunks across every file are fanned out into a single
+    thread pool (``EXTRACTION_WORKERS`` wide), so a long tail of small
+    one-chunk files no longer runs near-serial. Already-extracted chunks
+    are counted and skipped without an API call (resume). When ``state``
+    is provided, sub-phase progress is persisted so the UI shows a live
+    ``done/total`` counter and a fresh timestamp.
 
     Returns a summary dict::
 
@@ -235,26 +256,47 @@ def run_extraction(
     )
 
     if progress_callback:
-        progress_callback(
-            f"Extraction: {len(text_files)} OCR file(s) found "
-            f"(parallel x{EXTRACTION_WORKERS})"
-        )
+        progress_callback(f"Extraction: scanning {len(text_files)} OCR file(s)…")
 
-    summary_lock = threading.Lock()
+    # Build a single global work list of pending chunks across ALL files.
+    # source_page is precomputed here (while we still hold the file's text)
+    # so workers never need full_text — memory stays bounded to the pending
+    # chunk texts rather than every file's full text at once.
+    pending: List[Dict] = []  # {"stem", "piece", "page"}
+    for text_path in text_files:
+        stem = text_path.stem
+        with open(text_path, "r", encoding="utf-8") as f:
+            full_text = f.read()
+        pieces = chunk_text(full_text, chunk_size=chunk_size, overlap=overlap, stem=stem)
+        summary["files_processed"] += 1
+        summary["chunks_total"] += len(pieces)
+        for piece in pieces:
+            out_path = facts_dir / f"{piece.chunk_id}.json"
+            if out_path.exists():
+                summary["chunks_skipped"] += 1
+                try:
+                    with open(out_path, "r", encoding="utf-8") as f:
+                        existing = json.load(f)
+                    summary["facts_emitted"] += len(existing.get("facts", []))
+                except Exception:
+                    pass
+                continue
+            pending.append(
+                {"stem": stem, "piece": piece, "page": page_for_offset(full_text, piece.start_char)}
+            )
 
-    def _bump(**counts: int) -> None:
-        with summary_lock:
-            for key, val in counts.items():
-                summary[key] += val
+    total_pending = len(pending)
 
-    def _extract_one_chunk(piece: Chunk, stem: str, full_text: str) -> None:
-        """Call Claude for one chunk and persist it.
+    def _extract_one_chunk(item: Dict) -> Dict[str, int]:
+        """Call Claude for one chunk and persist it. Returns count deltas.
 
         Per-chunk isolation: one bad chunk (transient OS error, network
         blip, malformed model output) must NOT kill the whole phase. The
         chunk's JSON is simply not written, so the next Resume picks it up
         via the skip-if-present check.
         """
+        piece: Chunk = item["piece"]
+        stem: str = item["stem"]
         out_path = facts_dir / f"{piece.chunk_id}.json"
         try:
             prompt = build_extraction_prompt(
@@ -281,71 +323,59 @@ def run_extraction(
                     extraction_notes=f"validation_error: {exc.errors()[:3]}",
                 )
                 _atomic_write_json(out_path, empty.model_dump(mode="json"))
-                _bump(chunks_extracted=1)
-                return
+                return {"chunks_extracted": 1}
 
             stamped = _stamp_facts(
                 parsed,
                 source_file_stem=stem,
                 chunk_id=piece.chunk_id,
-                full_text=full_text,
+                page=item["page"],
                 chunk_start=piece.start_char,
                 chunk_end=piece.end_char,
             )
             _atomic_write_json(out_path, stamped.model_dump(mode="json"))
-            _bump(chunks_extracted=1, facts_emitted=len(stamped.facts))
+            return {"chunks_extracted": 1, "facts_emitted": len(stamped.facts)}
         except Exception as exc:  # noqa: BLE001
             log.exception(
                 "Transient failure on chunk %s; will retry on next resume",
                 piece.chunk_id,
             )
-            _bump(chunks_failed_transient=1)
-            if progress_callback:
-                progress_callback(
-                    f"Extraction: {piece.chunk_id} failed transiently "
-                    f"({type(exc).__name__}); will retry on next resume"
-                )
+            return {"chunks_failed_transient": 1}
 
-    # Process one file at a time (bounds memory to a single file's OCR text)
-    # but fan its pending chunks out across a thread pool. Already-extracted
-    # chunks are counted and skipped without an API call (resume).
-    for text_path in text_files:
-        stem = text_path.stem  # e.g. "record_001"
-        with open(text_path, "r", encoding="utf-8") as f:
-            full_text = f.read()
-        pieces = chunk_text(full_text, chunk_size=chunk_size, overlap=overlap, stem=stem)
-        _bump(files_processed=1, chunks_total=len(pieces))
+    if progress_callback:
+        progress_callback(
+            f"Extraction: {total_pending} chunk(s) to extract across "
+            f"{summary['files_processed']} file(s) "
+            f"({summary['chunks_skipped']} already done) — parallel x{EXTRACTION_WORKERS}"
+        )
+    _report_progress(session_store, state, PHASE_EXTRACTION, 0, total_pending, "starting")
 
-        pending: List[Chunk] = []
-        for piece in pieces:
-            out_path = facts_dir / f"{piece.chunk_id}.json"
-            if out_path.exists():
-                _bump(chunks_skipped=1)
-                try:
-                    with open(out_path, "r", encoding="utf-8") as f:
-                        existing = json.load(f)
-                    _bump(facts_emitted=len(existing.get("facts", [])))
-                except Exception:
-                    pass
-                continue
-            pending.append(piece)
-
-        if not pending:
-            continue
-
-        if progress_callback:
-            progress_callback(
-                f"Extraction: {stem}: {len(pending)} chunk(s) "
-                f"({len(pieces) - len(pending)} already done)"
-            )
-
+    # One shared pool over every pending chunk keeps all workers saturated
+    # regardless of how the chunks are distributed across files. Progress is
+    # reported from this (single) main thread, so state.json has one writer.
+    if total_pending:
+        completed = 0
         with ThreadPoolExecutor(max_workers=EXTRACTION_WORKERS) as pool:
-            futures = [
-                pool.submit(_extract_one_chunk, piece, stem, full_text)
-                for piece in pending
-            ]
+            futures = [pool.submit(_extract_one_chunk, item) for item in pending]
             for fut in as_completed(futures):
-                fut.result()  # _extract_one_chunk swallows its own errors
+                counts = fut.result()  # worker swallows its own errors
+                for key, val in counts.items():
+                    summary[key] += val
+                completed += 1
+                if completed % 10 == 0 or completed == total_pending:
+                    if progress_callback:
+                        progress_callback(
+                            f"Extraction: {completed}/{total_pending} chunks "
+                            f"({summary['facts_emitted']} facts so far)"
+                        )
+                    _report_progress(
+                        session_store,
+                        state,
+                        PHASE_EXTRACTION,
+                        completed,
+                        total_pending,
+                        f"{summary['facts_emitted']} facts",
+                    )
 
     if progress_callback:
         msg = (

@@ -384,6 +384,7 @@ class PrecisionChronologyPipeline:
             self.store,
             state.session_id,
             self.anthropic_client,
+            state=state,
             model=model,
             progress_callback=cb,
         )
@@ -409,6 +410,7 @@ class PrecisionChronologyPipeline:
             self.store,
             state.session_id,
             self.anthropic_client,
+            state=state,
             model=model,
             progress_callback=cb,
         )

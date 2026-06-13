@@ -24,9 +24,10 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from src.anthropic_client import AnthropicClient
+from src.extractor import _report_progress
 from src.prompts.assembly import build_assembly_prompt, build_multi_provider_prompt
 from src.schemas import VerifiedFact
-from src.session_state import SessionStore
+from src.session_state import PHASE_ASSEMBLY, SessionStore
 from src.token_budget import SAFE_PROMPT_CHARS
 
 # Each visit group's narration is an independent Claude call; only the final
@@ -215,10 +216,15 @@ def run_assembly(
     session_id: str,
     anthropic_client: AnthropicClient,
     *,
+    state=None,
     model: Optional[str] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> Dict:
     """Produce ``output/chronology.md`` from ``verified_facts.jsonl``.
+
+    Visit groups are narrated concurrently (``ASSEMBLY_WORKERS`` wide) then
+    reassembled in sorted order. When ``state`` is provided, sub-phase
+    progress is persisted so the UI shows a live counter.
 
     Returns a summary dict with the entry count and the path written.
     The first line of the file is a header placeholder which M11
@@ -308,6 +314,7 @@ def run_assembly(
     results: Dict[int, Tuple[ConsolidatedVisitKey, str]] = {}
     total_groups = len(ordered_keys)
     completed = 0
+    _report_progress(session_store, state, PHASE_ASSEMBLY, 0, total_groups, "starting")
     with ThreadPoolExecutor(max_workers=ASSEMBLY_WORKERS) as pool:
         futures = [
             pool.submit(_assemble_one, idx, key)
@@ -316,9 +323,13 @@ def run_assembly(
         for fut in as_completed(futures):
             idx, key, text = fut.result()
             completed += 1
-            if progress_callback and (completed % 10 == 0 or completed == total_groups):
-                progress_callback(
-                    f"Assembly: {completed}/{total_groups} visit entries narrated"
+            if completed % 10 == 0 or completed == total_groups:
+                if progress_callback:
+                    progress_callback(
+                        f"Assembly: {completed}/{total_groups} visit entries narrated"
+                    )
+                _report_progress(
+                    session_store, state, PHASE_ASSEMBLY, completed, total_groups, "narrating"
                 )
             if not text:
                 log.warning(
