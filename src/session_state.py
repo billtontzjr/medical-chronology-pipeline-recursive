@@ -78,7 +78,7 @@ class SessionState:
     destination_folder: str
     created_at: str
     updated_at: str
-    status: str = STATUS_IN_PROGRESS
+    status: str = STATUS_PENDING
     last_error: Optional[str] = None
     phases: Dict[str, PhaseState] = field(default_factory=dict)
 
@@ -127,7 +127,7 @@ class SessionState:
             destination_folder=d.get("destination_folder", ""),
             created_at=d.get("created_at", datetime.now().isoformat(timespec="seconds")),
             updated_at=d.get("updated_at", datetime.now().isoformat(timespec="seconds")),
-            status=d.get("status", STATUS_IN_PROGRESS),
+            status=d.get("status", STATUS_PENDING),
             last_error=d.get("last_error"),
             phases=phases,
         )
