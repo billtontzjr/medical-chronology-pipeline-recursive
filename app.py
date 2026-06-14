@@ -23,6 +23,7 @@ from src.cross_checker import CROSS_CHECK_JACCARD_THRESHOLD
 from src.pipeline import PrecisionChronologyPipeline
 from src.progress import ProgressReporter
 from src.session_state import (
+    PHASE_ASSEMBLY,
     PHASE_ORDER,
     STATUS_COMPLETE,
     STATUS_FAILED,
@@ -367,7 +368,7 @@ def _sessions_tab(pipeline: PrecisionChronologyPipeline) -> None:
                     status = ph.status if ph else "pending"
                     st.write(f"- {phase_name}: {status}")
 
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             if col1.button("Resume", key=f"resume_{sess.session_id}"):
                 pipeline.run_in_background(
                     sess.session_id,
@@ -383,6 +384,26 @@ def _sessions_tab(pipeline: PrecisionChronologyPipeline) -> None:
                 st.success("Pause requested. The run will exit at the next phase boundary.")
             if col3.button("Delete", key=f"del_{sess.session_id}"):
                 pipeline.store.delete(sess.session_id)
+                st.rerun()
+            if col4.button(
+                "Re-run from assembly",
+                key=f"reasm_{sess.session_id}",
+                help=(
+                    "Reuse the downloaded PDFs, OCR text, and extracted facts; "
+                    "re-run only assembly → cross-check → DOCX → upload with the "
+                    "latest logic. Fast — no re-OCR or re-extraction."
+                ),
+            ):
+                reasm_state = pipeline.store.load(sess.session_id)
+                pipeline.store.reset_from_phase(reasm_state, PHASE_ASSEMBLY)
+                pipeline.run_in_background(
+                    sess.session_id,
+                    model_extraction=MODEL_OPTIONS[0],
+                    model_assembly=MODEL_OPTIONS[0],
+                    strict_cross_check=False,
+                )
+                st.info("Re-running from assembly (reusing extracted facts).")
+                time.sleep(2)
                 st.rerun()
 
             if sess.status == STATUS_COMPLETE:

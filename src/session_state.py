@@ -244,6 +244,29 @@ class SessionStore:
         if d.exists():
             shutil.rmtree(d)
 
+    def reset_from_phase(self, state: SessionState, phase: str) -> SessionState:
+        """Mark ``phase`` and every later phase pending so a Resume re-runs them.
+
+        Earlier phases keep their completed status (and their on-disk artifacts:
+        downloaded PDFs, OCR text, extracted facts, verified facts), so a Resume
+        reuses all of that and only re-runs from ``phase`` onward. Useful for
+        regenerating the chronology after an assembly/rendering change without
+        re-OCRing or re-extracting.
+        """
+        if phase not in PHASE_ORDER:
+            raise ValueError(f"Unknown phase: {phase}")
+        start = PHASE_ORDER.index(phase)
+        for ph in PHASE_ORDER[start:]:
+            p = state.phases.setdefault(ph, PhaseState())
+            p.status = STATUS_PENDING
+            p.error = None
+            p.completed_at = None
+            p.progress = None
+        state.status = STATUS_IN_PROGRESS
+        state.last_error = None
+        self.save(state)
+        return state
+
     # ------------------------------------------------------------- disk mgmt
     def disk_usage(self) -> Tuple[int, int, int]:
         """Return ``(total, used, free)`` bytes for the sessions filesystem.
