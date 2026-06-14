@@ -365,19 +365,25 @@ class ChronologyAgent:
         input_path = Path(input_dir)
         documents = []
 
-        for txt_file in sorted(input_path.glob('*.txt')):
+        for txt_file in sorted(input_path.rglob('*.txt')):
             try:
                 with open(txt_file, 'r', encoding='utf-8') as f:
                     content = f.read()
+                    display_name = str(txt_file.relative_to(input_path))
 
                     # Chunk if too large (20K chars = ~80K tokens with overhead, very conservative)
-                    chunks = self._chunk_large_document(txt_file.name, content, max_chunk_chars=20000)
+                    chunks = self._chunk_large_document(
+                        display_name, content, max_chunk_chars=20000
+                    )
                     documents.extend(chunks)
 
                     if len(chunks) > 1:
-                        self.logger.info(f"Loaded {txt_file.name} ({len(content)} chars) → {len(chunks)} chunks")
+                        self.logger.info(
+                            f"Loaded {display_name} ({len(content)} chars) "
+                            f"as {len(chunks)} chunks"
+                        )
                     else:
-                        self.logger.info(f"Loaded {txt_file.name} ({len(content)} chars)")
+                        self.logger.info(f"Loaded {display_name} ({len(content)} chars)")
             except Exception as e:
                 self.logger.error(f"Failed to read {txt_file.name}: {e}")
 
@@ -934,7 +940,8 @@ Do NOT include header or JSON - just the chronology entries."""
         chronology_md = header + body
 
         # Real summary + gaps
-        source_files = [p.name for p in sorted(Path(input_dir).glob("*.txt"))]
+        input_path = Path(input_dir)
+        source_files = [str(p.relative_to(input_path)) for p in sorted(input_path.rglob("*.txt"))]
         docs_md = self.generate_summary_and_gaps(
             chronology_md, source_files, progress_callback
         )

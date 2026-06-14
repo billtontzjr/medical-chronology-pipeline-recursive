@@ -90,6 +90,37 @@ def _dropbox_content_hash(path: str) -> str:
     return hasher.hexdigest()
 
 
+def _safe_local_path(local_dir: str, relative_path: str) -> str:
+    """Build a local path under local_dir from a Dropbox relative path."""
+    base = Path(local_dir).resolve()
+    clean_parts = [
+        part
+        for part in relative_path.replace("\\", "/").split("/")
+        if part and part not in {".", ".."}
+    ]
+    if not clean_parts:
+        raise ValueError("Empty Dropbox file path")
+    target = base.joinpath(*clean_parts)
+    resolved_parent = target.parent.resolve()
+    if resolved_parent != base and base not in resolved_parent.parents:
+        raise ValueError(f"Refusing to write outside download directory: {relative_path}")
+    return str(target)
+
+
+def _dropbox_relative_path(base_folder: str, entry_path: Optional[str], name: str) -> str:
+    """Return entry_path relative to base_folder, falling back to name."""
+    if not entry_path:
+        return name
+    base = (base_folder or "").rstrip("/")
+    path = entry_path.lstrip("/")
+    if base:
+        base = base.lstrip("/")
+        prefix = base + "/"
+        if path.lower().startswith(prefix.lower()):
+            return path[len(prefix):]
+    return name
+
+
 class DropboxTool:
     """Handle Dropbox operations for medical record downloads."""
 
@@ -232,8 +263,14 @@ class DropboxTool:
                 'dropbox_path': dropbox_path
             }
 
-    def download_folder(self, folder_path: str, local_dir: str,
-                       extensions: Optional[List[str]] = None, recursive: bool = True) -> Dict:
+    def download_folder(
+        self,
+        folder_path: str,
+        local_dir: str,
+        extensions: Optional[List[str]] = None,
+        recursive: bool = True,
+        _base_folder: Optional[str] = None,
+    ) -> Dict:
         """
         Download all files from a Dropbox folder.
 
@@ -248,6 +285,8 @@ class DropboxTool:
         """
         if extensions is None:
             extensions = ['.pdf']
+        if _base_folder is None:
+            _base_folder = folder_path
 
         results = {
             'success': True,
@@ -270,8 +309,12 @@ class DropboxTool:
                             results['skipped'].append(entry.name)
                             continue
 
-                        # Download file
-                        local_path = os.path.join(local_dir, entry.name)
+                        # Download file, preserving subfolders to avoid
+                        # collisions between files with the same name.
+                        rel_path = _dropbox_relative_path(
+                            _base_folder, entry.path_display, entry.name
+                        )
+                        local_path = _safe_local_path(local_dir, rel_path)
                         download_result = self.download_file(entry.path_display, local_path)
 
                         if download_result['success']:
@@ -286,7 +329,8 @@ class DropboxTool:
                             entry.path_display,
                             local_dir,
                             extensions,
-                            recursive=True
+                            recursive=True,
+                            _base_folder=_base_folder,
                         )
                         # Merge results
                         results['downloaded'].extend(subfolder_results['downloaded'])
@@ -347,7 +391,7 @@ class DropboxTool:
             if isinstance(link_metadata, dropbox.files.FileMetadata):
                 if any(link_metadata.name.lower().endswith(ext.lower())
                       for ext in extensions):
-                    local_path = os.path.join(local_dir, link_metadata.name)
+                    local_path = _safe_local_path(local_dir, link_metadata.name)
 
                     # Download via shared link
                     _, response = self.dbx.sharing_get_shared_link_file(shared_link)
@@ -366,11 +410,17 @@ class DropboxTool:
 
             # If it's a folder, list and download files RECURSIVELY
             else:
-                # List folder contents
-                list_result = self.dbx.files_list_folder(
-                    '',
-                    shared_link=dropbox.files.SharedLink(url=shared_link)
-                )
+                def list_shared_folder(path):
+                    """List all entries for a shared-link folder path."""
+                    response = self.dbx.files_list_folder(
+                        path,
+                        shared_link=dropbox.files.SharedLink(url=shared_link)
+                    )
+                    entries = list(response.entries)
+                    while response.has_more:
+                        response = self.dbx.files_list_folder_continue(response.cursor)
+                        entries.extend(response.entries)
+                    return entries
 
                 # Process all entries (files and folders) recursively
                 def process_entries(entries_list, path_prefix=''):
@@ -384,12 +434,10 @@ class DropboxTool:
                             # List subfolder contents
                             subfolder_path = f"{path_prefix}/{entry.name}" if path_prefix else f"/{entry.name}"
                             try:
-                                subfolder_result = self.dbx.files_list_folder(
-                                    subfolder_path,
-                                    shared_link=dropbox.files.SharedLink(url=shared_link)
-                                )
                                 # Recursively process subfolder entries
-                                process_entries(subfolder_result.entries, subfolder_path)
+                                process_entries(
+                                    list_shared_folder(subfolder_path), subfolder_path
+                                )
                             except Exception as e:
                                 import logging
                                 logging.error(f"Error listing subfolder {entry.name}: {e}")
@@ -398,11 +446,12 @@ class DropboxTool:
                         elif isinstance(entry, FileMetadata):
                             if any(entry.name.lower().endswith(ext.lower())
                                   for ext in extensions):
-                                local_path = os.path.join(local_dir, entry.name)
-
                                 try:
                                     # Download via shared link
                                     file_path = f"{path_prefix}/{entry.name}" if path_prefix else f"/{entry.name}"
+                                    local_path = _safe_local_path(
+                                        local_dir, file_path.lstrip("/")
+                                    )
                                     _, response = self.dbx.sharing_get_shared_link_file(
                                         shared_link,
                                         path=file_path
@@ -429,7 +478,7 @@ class DropboxTool:
                                 results['skipped'].append(entry.name)
                 
                 # Start processing from root
-                process_entries(list_result.entries)
+                process_entries(list_shared_folder(''))
 
         except dropbox.exceptions.ApiError as e:
             results['success'] = False

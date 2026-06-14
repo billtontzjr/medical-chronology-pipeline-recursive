@@ -25,7 +25,7 @@ RUN mkdir -p data/input data/extracted data/output
 EXPOSE 8501
 
 # Health check
-HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health || exit 1
+HEALTHCHECK CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=5).read()" || exit 1
 
 # Run Streamlit app
 CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]

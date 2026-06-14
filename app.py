@@ -194,6 +194,27 @@ def _render_completed_session(
                 key=f"dl_{key_prefix}_{state.session_id}_{p.name}",
             )
 
+    st.markdown("### 🔍 Verify chronology")
+    st.caption("Runs an AI-assisted check against the extracted source text and saves verification.md.")
+    verify_now = st.button(
+        "Run verification",
+        key=f"verify_{key_prefix}_{state.session_id}",
+        use_container_width=True,
+    )
+    if verify_now:
+        status_box = st.status("Verifying chronology…", expanded=True)
+
+        def _verify_cb(msg: str) -> None:
+            status_box.write(msg)
+
+        result = pipeline.verify_session(state.session_id, progress_callback=_verify_cb)
+        if result.get("success"):
+            status_box.update(label="✅ Verification report saved", state="complete")
+            st.rerun()
+        else:
+            status_box.update(label="❌ Verification failed", state="error")
+            st.error(result.get("error", "Verification failed."))
+
     st.markdown("### 📤 Re-upload to Dropbox")
     st.caption(f"Last uploaded to `{state.destination_folder}`")
     recents = recent_destinations(pipeline)

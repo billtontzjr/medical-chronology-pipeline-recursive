@@ -25,7 +25,7 @@ def check_formatting_violations(content: str) -> list:
         r'^\s*\*\s+',  # * bullet
         r'^\s*-\s+',   # - bullet
         r'^\s*•\s+',   # • bullet
-        r'^\d+\.\s+',  # numbered list
+        r'^\s*\d+\.\s+',  # numbered list
     ]
     for pattern in bullet_patterns:
         if re.search(pattern, content, re.MULTILINE):

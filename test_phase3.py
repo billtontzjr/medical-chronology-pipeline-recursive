@@ -5,6 +5,14 @@ import os
 import sys
 from pathlib import Path
 from dotenv import load_dotenv
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason=(
+        "Manual Claude integration script. Run `python test_phase3.py` with "
+        "local data and ANTHROPIC_API_KEY when needed."
+    )
+)
 
 # Load environment variables
 load_dotenv()
