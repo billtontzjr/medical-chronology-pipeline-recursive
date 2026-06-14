@@ -329,7 +329,7 @@ class MedicalChronologyPipeline:
         # Resume: skip PDFs whose .txt already exists and is non-empty
         pending: List[Path] = []
         for p in pdf_paths:
-            txt = extracted_dir / (p.stem + ".txt")
+            txt = extracted_dir / p.relative_to(input_dir).with_suffix(".txt")
             if txt.exists() and txt.stat().st_size > 0:
                 continue
             pending.append(p)
@@ -355,7 +355,7 @@ class MedicalChronologyPipeline:
                 )
 
         # Verify at least something came out
-        if not list(extracted_dir.glob("*.txt")):
+        if not list(extracted_dir.rglob("*.txt")):
             raise RuntimeError("No text could be extracted from PDFs")
 
     async def _phase_generate(
