@@ -5,8 +5,6 @@ import io
 import gc
 from pathlib import Path
 from typing import Dict, List, Callable, Optional
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import httpx
 from pdf2image import convert_from_path
 from PIL import Image
@@ -34,9 +32,12 @@ class OCRClient:
         import logging
         logger = logging.getLogger(__name__)
 
-        print(f"🔍 IMAGE_TO_BASE64: {image.size[0]}x{image.size[1]} pixels, mode={image.mode}")
-        logger.warning(f"🔍 IMAGE_TO_BASE64: {image.size[0]}x{image.size[1]} pixels, mode={image.mode}")
-        logger.info(f"Image to encode: {image.size[0]}x{image.size[1]} pixels, mode={image.mode}")
+        logger.debug(
+            "Image to encode: %sx%s pixels, mode=%s",
+            image.size[0],
+            image.size[1],
+            image.mode,
+        )
 
         # Convert RGBA to RGB if needed (JPEG doesn't support transparency)
         if image.mode in ('RGBA', 'LA', 'P'):
@@ -293,6 +294,7 @@ class OCRClient:
             return {
                 'success': True,
                 'file_name': file_name,
+                'source_path': str(Path(file_path)),
                 'text': full_text,
                 'confidence': confidence,
                 'page_count': total_pages
@@ -302,6 +304,7 @@ class OCRClient:
             return {
                 'success': False,
                 'file_name': Path(file_path).name,
+                'source_path': str(Path(file_path)),
                 'error': str(e),
                 'text': '',
                 'confidence': 0.0
@@ -339,7 +342,12 @@ class OCRClient:
 
         return results
 
-    def save_extracted_text(self, result: Dict, output_dir: str) -> str:
+    def save_extracted_text(
+        self,
+        result: Dict,
+        output_dir: str,
+        base_input_dir: Optional[str] = None,
+    ) -> str:
         """
         Save extracted text to a file.
 
@@ -353,9 +361,16 @@ class OCRClient:
         if not result['success']:
             raise Exception(f"Cannot save failed extraction: {result.get('error')}")
 
-        # Create output filename (replace .pdf with .txt)
-        file_name = Path(result['file_name']).stem + '.txt'
-        output_path = Path(output_dir) / file_name
+        source_path = Path(result.get('source_path') or result['file_name'])
+        if base_input_dir:
+            try:
+                rel_path = source_path.resolve().relative_to(Path(base_input_dir).resolve())
+            except ValueError:
+                rel_path = Path(result['file_name'])
+        else:
+            rel_path = Path(result['file_name'])
+
+        output_path = Path(output_dir) / rel_path.with_suffix('.txt')
 
         # Ensure output directory exists
         output_path.parent.mkdir(parents=True, exist_ok=True)

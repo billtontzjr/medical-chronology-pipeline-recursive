@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
@@ -40,6 +41,23 @@ STATUS_IN_PROGRESS = "in_progress"
 STATUS_COMPLETE = "complete"
 STATUS_FAILED = "failed"
 STATUS_PAUSED = "paused"
+
+SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+def validate_session_id(session_id: str) -> str:
+    """Return a safe session id or raise ValueError.
+
+    Session IDs are used as directory names under data/sessions. Keep them as
+    single path segments so a crafted value cannot escape the session root.
+    """
+    if not session_id or not SESSION_ID_PATTERN.fullmatch(session_id):
+        raise ValueError(
+            "Invalid session_id. Use letters, numbers, dots, underscores, or hyphens."
+        )
+    if session_id in {".", ".."}:
+        raise ValueError("Invalid session_id.")
+    return session_id
 
 
 @dataclass
@@ -136,10 +154,15 @@ class SessionStore:
         self.base_dir = Path(base_dir)
         self.sessions_root = self.base_dir / "data" / "sessions"
         self.sessions_root.mkdir(parents=True, exist_ok=True)
+        self._sessions_root_resolved = self.sessions_root.resolve()
 
     # ------------------------------------------------------------------ paths
     def session_dir(self, session_id: str) -> Path:
+        session_id = validate_session_id(session_id)
         d = self.sessions_root / session_id
+        resolved = d.resolve()
+        if resolved != self._sessions_root_resolved and self._sessions_root_resolved not in resolved.parents:
+            raise ValueError(f"Session path escapes session root: {session_id}")
         d.mkdir(parents=True, exist_ok=True)
         return d
 
@@ -215,7 +238,8 @@ class SessionStore:
 
     def delete(self, session_id: str) -> None:
         import shutil
-        d = self.sessions_root / session_id
+        session_id = validate_session_id(session_id)
+        d = self.session_dir(session_id)
         if d.exists():
             shutil.rmtree(d)
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -42,6 +43,18 @@ from .tools.dropbox_tool import DropboxTool, normalize_dropbox_folder
 
 
 DEFAULT_DESTINATION_PREFIX = "/Medical chronology pipeline outputs"
+
+
+def safe_patient_id(patient_id: Optional[str]) -> str:
+    """Convert a patient label into a safe session-id prefix."""
+    if not patient_id:
+        return ""
+    value = patient_id.strip().lower()
+    value = re.sub(r"[^a-z0-9_.-]+", "_", value)
+    value = re.sub(r"_+", "_", value).strip("._-")
+    if not value:
+        raise ValueError("Patient ID must include at least one letter or number.")
+    return value[:80]
 
 
 class MedicalChronologyPipeline:
@@ -82,13 +95,14 @@ class MedicalChronologyPipeline:
     ) -> SessionState:
         """Create a new session and persist initial state."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        session_id = f"{patient_id}_{timestamp}" if patient_id else timestamp
+        patient_prefix = safe_patient_id(patient_id)
+        session_id = f"{patient_prefix}_{timestamp}" if patient_prefix else timestamp
         destination = normalize_dropbox_folder(
             destination_folder or self._default_destination(session_id)
         )
         return self.store.create(
             session_id=session_id,
-            patient_id=patient_id or "",
+            patient_id=patient_prefix,
             dropbox_link=dropbox_link,
             destination_folder=destination,
         )
@@ -114,6 +128,39 @@ class MedicalChronologyPipeline:
             up.data = {}
         self.store.save(state)
         return state
+
+    def verify_session(
+        self,
+        session_id: str,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> Dict:
+        """Verify a completed chronology against extracted source text."""
+        state = self.store.load(session_id)
+        chronology_path = self.store.output_dir(session_id) / "chronology.md"
+        if not chronology_path.exists():
+            return {
+                "success": False,
+                "error": "chronology.md does not exist for this session.",
+            }
+
+        result = self.chronology_agent.verify_chronology(
+            chronology_path=str(chronology_path),
+            extracted_dir=str(self.store.extracted_dir(session_id)),
+            progress_callback=progress_callback,
+        )
+        if not result.get("success"):
+            return result
+
+        report_path = self.store.output_dir(session_id) / "verification.md"
+        report_text = result.get("verification", "")
+        report_path.write_text(report_text, encoding="utf-8")
+        state.phases[PHASE_SUMMARY].data["verification_report"] = str(report_path)
+        self.store.save(state)
+        return {
+            "success": True,
+            "verification_path": str(report_path),
+            "documents_checked": result.get("documents_checked", 0),
+        }
 
     # --------------------------------------------------------------- pause API
     def _should_pause(self, session_id: str) -> bool:
@@ -248,11 +295,13 @@ class MedicalChronologyPipeline:
         # so re-runs are safe. If any PDFs exist we assume the previous run
         # downloaded everything (the download API doesn't support partial
         # resume cleanly).
-        existing = list(Path(input_dir).glob("*.pdf")) + list(Path(input_dir).glob("*.PDF"))
+        existing = list(Path(input_dir).rglob("*.pdf")) + list(Path(input_dir).rglob("*.PDF"))
         if existing:
             cb(f"   ↳ {len(existing)} PDF(s) already on disk, skipping re-download")
             self.store.update_phase_data(
-                state, PHASE_DOWNLOAD, {"files": [p.name for p in existing]}
+                state,
+                PHASE_DOWNLOAD,
+                {"files": [str(p.relative_to(input_dir)) for p in existing]},
             )
             return
 
@@ -273,7 +322,7 @@ class MedicalChronologyPipeline:
         input_dir = self.store.input_dir(state.session_id)
         extracted_dir = self.store.extracted_dir(state.session_id)
 
-        pdf_paths = sorted(list(input_dir.glob("*.pdf")) + list(input_dir.glob("*.PDF")))
+        pdf_paths = sorted(list(input_dir.rglob("*.pdf")) + list(input_dir.rglob("*.PDF")))
         if not pdf_paths:
             raise RuntimeError("No downloaded PDFs found to OCR")
 
@@ -297,7 +346,9 @@ class MedicalChronologyPipeline:
         )
         for r in results:
             if r["success"]:
-                self.ocr_client.save_extracted_text(r, str(extracted_dir))
+                self.ocr_client.save_extracted_text(
+                    r, str(extracted_dir), base_input_dir=str(input_dir)
+                )
             else:
                 self.logger.error(
                     f"OCR failed for {r.get('file_name')}: {r.get('error')}"
