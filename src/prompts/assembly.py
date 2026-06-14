@@ -67,6 +67,7 @@ HARD RULES:
 - Do NOT prefix the provider name with "Provider:" or any label. Write the name directly.
 
 PROVIDER NAME RULES:
+- The attributed provider in the first sentence MUST be the provider_name (with provider_credentials) given in VISIT IDENTITY above. This is the primary/attending provider selected for this consolidated visit. Do NOT substitute a different provider even if other providers (e.g. nurses) appear in the verified facts; their findings may still be narrated in the body, but the entry is attributed to the VISIT IDENTITY provider. If VISIT IDENTITY provider_name is null or empty, choose the most senior provider present in the facts: physician (MD/DO) over PA/NP over RN.
 - Always include credentials when any verified fact in this visit group contains them. Format as "First Last, Credential" exactly once at the start of the entry. Never duplicate the credential.
 - If the source has "Last, First" format, flip to "First Last".
 - If the source has the credential appearing twice (e.g. "Bobrik MD, Linda, MD"), deduplicate to "Linda Bobrik, MD".

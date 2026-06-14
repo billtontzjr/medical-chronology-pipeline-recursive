@@ -85,7 +85,9 @@ def _visit_category(visit_type: Optional[str]) -> str:
 
 
 def _consolidated_key_for_fact(fact: VerifiedFact) -> ConsolidatedVisitKey:
-    return (fact.visit_date or "", _visit_category(fact.visit_type))
+    # Strip the date so whitespace/format variance ("10/10/2022" vs
+    # "10/10/2022 ") doesn't split one date of service into two entries.
+    return ((fact.visit_date or "").strip(), _visit_category(fact.visit_type))
 
 
 def _most_common(values: List[Optional[str]]) -> Optional[str]:
@@ -97,8 +99,11 @@ def _most_common(values: List[Optional[str]]) -> Optional[str]:
 
 
 def _provider_rank(credentials: Optional[str], name: Optional[str]) -> int:
-    """Rank a provider by credential (see ``_PROVIDER_RANK``); default 1."""
-    text = f"{credentials or ''} {name or ''}".lower()
+    """Rank a provider by credential (see ``_PROVIDER_RANK``); default 1.
+
+    Periods are stripped first so "M.D." / "R.N." match "md" / "rn".
+    """
+    text = f"{credentials or ''} {name or ''}".lower().replace(".", "")
     best = 1
     for token, rank in _PROVIDER_RANK.items():
         if re.search(rf"(?<![a-z]){re.escape(token)}(?![a-z])", text):
