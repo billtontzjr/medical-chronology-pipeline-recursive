@@ -17,7 +17,7 @@ import json
 import logging
 import os
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -52,24 +52,83 @@ MAX_FACTS_PER_VISIT_GROUP = 250
 APPROX_CHARS_PER_FACT = 600
 
 
-# Consolidated key: (visit_date, facility, visit_type)
-ConsolidatedVisitKey = Tuple[str, str, str]
+# Consolidated key: (visit_date, visit_category).
+#
+# Facility is intentionally NOT part of the key: the same encounter is often
+# recorded under slightly different facility names ("Sharp Rees-Stealy" vs
+# "Sharp Rees-Stealy DFR" vs "Sharp Rees-Stealy Medical Group") and must not be
+# split into duplicate entries. visit_category keeps ER visits separate from
+# everything else — office visits, follow-ups, consults, urgent care, etc. all
+# collapse into a single entry per date — per the desired output. The actual
+# facility name and visit_type label shown in the entry are chosen from the
+# group's facts (most common value), not from the key.
+ConsolidatedVisitKey = Tuple[str, str]
+
+# Higher rank wins when choosing the single provider to attribute a visit to:
+# attending physician (MD/DO) over mid-levels (PA/NP) over nursing (RN) over
+# unknown. Ties are broken by how many of the visit's facts mention them.
+_PROVIDER_RANK = {
+    "md": 5, "do": 5,
+    "dpm": 4, "od": 4, "dc": 4, "psyd": 4, "pharmd": 4,
+    "np": 4, "fnp": 4, "pa": 4, "pa-c": 4,
+    "dpt": 3, "pt": 3,
+    "rn": 2,
+}
+
+
+def _visit_category(visit_type: Optional[str]) -> str:
+    """Bucket a raw visit_type for grouping. Only ER visits stay distinct."""
+    vt = (visit_type or "").strip().lower()
+    if "emerg" in vt or vt in {"er", "ed", "er visit", "ed visit"}:
+        return "Emergency"
+    return "Visit"
 
 
 def _consolidated_key_for_fact(fact: VerifiedFact) -> ConsolidatedVisitKey:
-    return (
-        fact.visit_date or "",
-        fact.facility or UNKNOWN_PLACEHOLDER,
-        fact.visit_type or UNKNOWN_PLACEHOLDER,
-    )
+    return (fact.visit_date or "", _visit_category(fact.visit_type))
 
 
-def _consolidated_key_to_dict(key: ConsolidatedVisitKey) -> Dict:
-    return {
-        "visit_date": key[0] or None,
-        "facility": key[1] if key[1] != UNKNOWN_PLACEHOLDER else None,
-        "visit_type": key[2] if key[2] != UNKNOWN_PLACEHOLDER else None,
-    }
+def _most_common(values: List[Optional[str]]) -> Optional[str]:
+    """Most frequent non-empty value, or None if all are empty."""
+    vals = [v for v in values if v]
+    if not vals:
+        return None
+    return Counter(vals).most_common(1)[0][0]
+
+
+def _provider_rank(credentials: Optional[str], name: Optional[str]) -> int:
+    """Rank a provider by credential (see ``_PROVIDER_RANK``); default 1."""
+    text = f"{credentials or ''} {name or ''}".lower()
+    best = 1
+    for token, rank in _PROVIDER_RANK.items():
+        if re.search(rf"(?<![a-z]){re.escape(token)}(?![a-z])", text):
+            best = max(best, rank)
+    return best
+
+
+def _pick_primary_provider(
+    facts: List[VerifiedFact],
+) -> Tuple[Optional[str], Optional[str]]:
+    """Choose the single provider to attribute a consolidated entry to.
+
+    Prefers the highest-credentialed provider (attending MD/DO > PA/NP > RN >
+    unknown); ties broken by how many of the visit's facts mention them.
+    """
+    by_name: Dict[str, Dict] = {}
+    for f in facts:
+        name = (f.provider_name or "").strip()
+        if not name:
+            continue
+        rec = by_name.setdefault(name, {"count": 0, "cred": f.provider_credentials, "rank": 0})
+        rec["count"] += 1
+        r = _provider_rank(f.provider_credentials, name)
+        if r > rec["rank"]:
+            rec["rank"] = r
+            rec["cred"] = f.provider_credentials
+    if not by_name:
+        return None, None
+    best = max(by_name, key=lambda n: (by_name[n]["rank"], by_name[n]["count"]))
+    return best, by_name[best]["cred"]
 
 
 def _sort_key(key: ConsolidatedVisitKey) -> Tuple[int, str]:
@@ -259,52 +318,53 @@ def run_assembly(
     def _assemble_one(
         idx: int, key: ConsolidatedVisitKey
     ) -> Tuple[int, ConsolidatedVisitKey, str]:
-        """Narrate one visit group via Claude. Returns (idx, key, text).
+        """Narrate one consolidated date-of-service entry. Returns (idx, key, text).
 
-        Resilient: a single group that fails (after the client's own
-        retries) is logged and omitted rather than killing the phase.
+        All facts for the date+category are folded into ONE narrative — nothing
+        is dropped — attributed to a single primary provider (attending
+        preferred). The facility name and visit_type label are the most common
+        values seen across the group's facts. This produces one tight paragraph
+        per visit (no per-provider sub-headings / internal blank lines) and
+        collapses facility-name variants and RN/MD duplicates of the same visit.
+
+        Resilient: a single group that fails (after the client's own retries)
+        is logged and omitted rather than killing the phase.
         """
-        visit_key = _consolidated_key_to_dict(key)
+        group_facts = groups[key]
         try:
-            visit_facts, was_capped = _cap_visit_facts(groups[key])
+            visit_facts, was_capped = _cap_visit_facts(group_facts)
             if was_capped:
                 log.warning(
-                    "Assembly: visit %s capped from %d to %d facts to stay under token budget",
+                    "Assembly: %s capped from %d to %d facts to stay under token budget",
                     key,
-                    len(groups[key]),
+                    len(group_facts),
                     len(visit_facts),
                 )
-            provider_groups = _sub_group_by_provider(visit_facts)
-            unique_providers = [
-                p for p in provider_groups if p != UNKNOWN_PLACEHOLDER
-            ]
 
-            if len(unique_providers) <= 1:
-                # Single provider or all unknown: standard single-paragraph prompt
-                sample = visit_facts[0]
-                single_key = dict(visit_key)
-                single_key["provider_name"] = sample.provider_name
-                single_key["provider_credentials"] = sample.provider_credentials
-                prompt = build_assembly_prompt(
-                    single_key, visit_facts, known_credentials=credential_lookup
-                )
-                max_tokens = 2000
-            else:
-                # Multiple providers: use multi-provider prompt
-                prompt = build_multi_provider_prompt(
-                    visit_key, provider_groups, known_credentials=credential_lookup
-                )
-                max_tokens = 4000  # larger output for multi-provider entries
+            # Pick the single attributed provider (attending preferred) and the
+            # representative facility / visit-type label from the WHOLE group
+            # (not just the capped sample), so consolidation is stable.
+            primary_name, primary_cred = _pick_primary_provider(group_facts)
+            visit_key = {
+                "visit_date": key[0] or None,
+                "facility": _most_common([f.facility for f in group_facts]),
+                "visit_type": _most_common([f.visit_type for f in group_facts]),
+                "provider_name": primary_name,
+                "provider_credentials": primary_cred,
+            }
 
+            prompt = build_assembly_prompt(
+                visit_key, visit_facts, known_credentials=credential_lookup
+            )
             text = anthropic_client.complete(
-                prompt, model=model, max_tokens=max_tokens
+                prompt, model=model, max_tokens=3000
             ).strip()
             # Strip stray "Provider:" prefix the model sometimes adds
             text = re.sub(r"^Provider:\s*", "", text)
             return idx, key, text
         except Exception:  # noqa: BLE001
             log.exception(
-                "Assembly failed for visit_key=%s; entry omitted", visit_key
+                "Assembly failed for date=%s category=%s; entry omitted", key[0], key[1]
             )
             return idx, key, ""
 
@@ -333,8 +393,7 @@ def run_assembly(
                 )
             if not text:
                 log.warning(
-                    "Empty assembly output for visit_key=%s",
-                    _consolidated_key_to_dict(key),
+                    "Empty assembly output for date=%s category=%s", key[0], key[1]
                 )
                 continue
             results[idx] = (key, text)
