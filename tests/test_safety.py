@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from src.pipeline import MedicalChronologyPipeline
-from src.session_state import SessionStore, validate_session_id
+from src.session_state import STATUS_PENDING, SessionStore, validate_session_id
 from src.tools.dropbox_tool import _dropbox_relative_path, _safe_local_path
 
 
@@ -27,6 +27,18 @@ def test_session_store_keeps_paths_inside_sessions_root(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         store.session_dir("../../outside")
+
+
+def test_new_session_starts_pending(tmp_path: Path) -> None:
+    store = SessionStore(str(tmp_path))
+    state = store.create(
+        session_id="patient_20260101_120000",
+        patient_id="patient",
+        dropbox_link="",
+        destination_folder="/out",
+    )
+
+    assert state.status == STATUS_PENDING
 
 
 def test_dropbox_relative_path_preserves_nested_folder() -> None:

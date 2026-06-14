@@ -117,6 +117,7 @@ def render_phase_tracker(state: SessionState, container) -> None:
 
 def session_badge(status: str) -> str:
     icons = {
+        "pending": "⚪",
         STATUS_COMPLETE: "🟢",
         STATUS_IN_PROGRESS: "🟡",
         STATUS_PAUSED: "⏸️",
@@ -134,6 +135,37 @@ def recent_destinations(pipeline: MedicalChronologyPipeline, limit: int = 5) -> 
         if len(seen) >= limit:
             break
     return seen
+
+
+def run_session_with_progress(
+    pipeline: MedicalChronologyPipeline,
+    session_id: str,
+    *,
+    key_prefix: str,
+) -> None:
+    status_box = st.status("Running pipeline…", expanded=True)
+    with status_box:
+        live_slot = st.empty()
+
+    def _cb(msg: str) -> None:
+        if LIVE_MSG_PATTERN.search(msg):
+            live_slot.write(msg)
+        else:
+            live_slot.empty()
+            status_box.write(msg)
+
+    result = asyncio.run(pipeline.run(session_id, progress_callback=_cb))
+
+    if result["status"] == "complete":
+        status_box.update(label="✅ Pipeline complete", state="complete")
+    elif result["status"] == "paused":
+        status_box.update(label="⏸ Paused — you can resume anytime", state="running")
+    else:
+        status_box.update(label="❌ Pipeline failed", state="error")
+        st.error(result.get("error", "Unknown error"))
+
+    st.session_state["active_session_id"] = session_id
+    st.rerun()
 
 
 def _render_completed_session(
@@ -457,33 +489,7 @@ with tab_new:
                 )
 
             if run_now:
-                status_box = st.status("Running pipeline…", expanded=True)
-                # Fast-moving (page-level) messages overwrite a single slot;
-                # everything else appends to the main status log.
-                with status_box:
-                    live_slot = st.empty()
-
-                def _cb(msg: str) -> None:
-                    if LIVE_MSG_PATTERN.search(msg):
-                        live_slot.write(msg)
-                    else:
-                        # Clear the live slot when we move past that phase,
-                        # then record the milestone in the log.
-                        live_slot.empty()
-                        status_box.write(msg)
-
-                result = asyncio.run(pipeline.run(state.session_id, progress_callback=_cb))
-
-                if result["status"] == "complete":
-                    status_box.update(label="✅ Pipeline complete", state="complete")
-                elif result["status"] == "paused":
-                    status_box.update(label="⏸ Paused — you can resume anytime", state="running")
-                else:
-                    status_box.update(label="❌ Pipeline failed", state="error")
-                    st.error(result.get("error", "Unknown error"))
-
-                # Refresh UI with latest state
-                st.rerun()
+                run_session_with_progress(pipeline, state.session_id, key_prefix="newrun")
 
             # If completed, show outputs + re-upload
             if state.status == STATUS_COMPLETE:
@@ -523,7 +529,9 @@ with tab_sessions:
                         disabled=s.status == STATUS_COMPLETE,
                     ):
                         st.session_state["active_session_id"] = s.session_id
-                        st.rerun()
+                        run_session_with_progress(
+                            pipeline, s.session_id, key_prefix="sessions"
+                        )
                 with col_pause:
                     if st.button(
                         "⏸ Pause",
