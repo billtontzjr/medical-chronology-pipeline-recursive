@@ -1,6 +1,7 @@
 """Dropbox integration tool for downloading medical records."""
 
 import hashlib
+import json
 import logging
 import os
 import time
@@ -8,8 +9,12 @@ from pathlib import Path
 from typing import List, Dict, Optional
 from urllib.parse import unquote, urlparse
 import dropbox
+import httpx
 from dropbox.files import FileMetadata, FolderMetadata
 from dropbox.sharing import SharedLinkMetadata
+
+
+SHARED_LINK_FILE_URL = "https://content.dropboxapi.com/2/sharing/get_shared_link_file"
 
 
 logger = logging.getLogger(__name__)
@@ -160,6 +165,53 @@ class DropboxTool:
         # For shared links or other URLs, return as-is
         # (will be handled by the shared link API)
         return url_or_path
+
+    def _access_token(self) -> Optional[str]:
+        """Return a valid bearer token from the underlying SDK client.
+
+        Refreshes first when the client is OAuth2-refresh-based so the token
+        is current. Works for legacy direct-token clients too (the token is
+        stored in the same attribute).
+        """
+        dbx = self.dbx
+        for method in ("check_and_refresh_access_token", "refresh_access_token"):
+            fn = getattr(dbx, method, None)
+            if callable(fn):
+                try:
+                    fn()
+                    break
+                except Exception:  # noqa: BLE001
+                    continue
+        return getattr(dbx, "_oauth2_access_token", None)
+
+    def _download_shared_link_file(
+        self, shared_link: str, file_path: Optional[str], local_path: str
+    ) -> None:
+        """Download one file from a shared link via the raw content API.
+
+        We bypass the SDK's ``sharing_get_shared_link_file`` because its
+        response-metadata deserializer raises ValidationError on
+        ``link_permissions.resolved_visibility`` (a known SDK bug) even though
+        the file bytes download fine. Calling the content endpoint directly with
+        httpx sidesteps the metadata parsing entirely.
+        """
+        token = self._access_token()
+        if not token:
+            raise RuntimeError("Could not obtain a Dropbox access token")
+        arg: Dict[str, str] = {"url": shared_link}
+        if file_path:
+            arg["path"] = file_path
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Dropbox-API-Arg": json.dumps(arg),
+        }
+        with httpx.Client(timeout=180.0) as client:
+            resp = client.post(SHARED_LINK_FILE_URL, headers=headers)
+        if resp.status_code != 200:
+            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(local_path, "wb") as f:
+            f.write(resp.content)
 
     def list_files(self, folder_path: str = "") -> List[Dict]:
         """
@@ -361,12 +413,8 @@ class DropboxTool:
                       for ext in extensions):
                     local_path = os.path.join(local_dir, link_metadata.name)
 
-                    # Download via shared link
-                    _, response = self.dbx.sharing_get_shared_link_file(shared_link)
-
-                    Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-                    with open(local_path, 'wb') as f:
-                        f.write(response.content)
+                    # Download via shared link (raw HTTP; see _download_shared_link_file)
+                    self._download_shared_link_file(shared_link, None, local_path)
 
                     results['downloaded'].append({
                         'success': True,
@@ -413,16 +461,12 @@ class DropboxTool:
                                 local_path = os.path.join(local_dir, entry.name)
 
                                 try:
-                                    # Download via shared link
+                                    # Download via shared link (raw HTTP; see
+                                    # _download_shared_link_file)
                                     file_path = f"{path_prefix}/{entry.name}" if path_prefix else f"/{entry.name}"
-                                    _, response = self.dbx.sharing_get_shared_link_file(
-                                        shared_link,
-                                        path=file_path
+                                    self._download_shared_link_file(
+                                        shared_link, file_path, local_path
                                     )
-
-                                    Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-                                    with open(local_path, 'wb') as f:
-                                        f.write(response.content)
 
                                     results['downloaded'].append({
                                         'success': True,
