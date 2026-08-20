@@ -66,12 +66,12 @@ DROPBOX_OAUTH_OK = bool(DROPBOX_APP_KEY and DROPBOX_APP_SECRET and DROPBOX_REFRE
 # User-facing model options. The key is what appears in the selectbox; the
 # value is the model ID sent to the Anthropic API.
 MODEL_OPTIONS = {
-    "Sonnet 4.6 — recommended (balanced quality & cost)": "claude-sonnet-4-6",
+    "Opus 5 — recommended (highest accuracy, lowest hallucination risk)": "claude-opus-5",
+    "Sonnet 4.6 — balanced quality & cost": "claude-sonnet-4-6",
     "Sonnet 4.5 — tested baseline (fallback)": "claude-sonnet-4-5-20250929",
-    "Opus 4.7 — highest quality (≈5× more expensive)": "claude-opus-4-7",
     "Haiku 4.5 — fastest and cheapest (lower quality)": "claude-haiku-4-5-20251001",
 }
-DEFAULT_MODEL_LABEL = "Sonnet 4.6 — recommended (balanced quality & cost)"
+DEFAULT_MODEL_LABEL = "Opus 5 — recommended (highest accuracy, lowest hallucination risk)"
 
 
 @st.cache_resource(show_spinner=False)

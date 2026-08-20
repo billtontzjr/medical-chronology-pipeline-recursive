@@ -20,9 +20,22 @@ class ChronologyAgent:
     """Generate medical chronologies using direct Anthropic API calls."""
 
     # Default model. Override per-run via the UI selector, or globally via
-    # the ANTHROPIC_MODEL env var. Sonnet 4.6 is the best non-Opus option
-    # for medical-legal chronology work.
-    DEFAULT_MODEL = "claude-sonnet-4-6"
+    # the ANTHROPIC_MODEL env var. Opus 5 is the most accurate option for
+    # medical-legal chronology work, where hallucination risk matters more
+    # than the modest cost difference over Sonnet.
+    DEFAULT_MODEL = "claude-opus-5"
+
+    # Models that still accept sampling parameters (temperature). Opus 4.7+
+    # and the Claude 5 family reject temperature with a 400 error; reasoning
+    # mode replaces it as the consistency mechanism on those models.
+    _TEMPERATURE_SUPPORTED_PREFIXES = (
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-6",
+        "claude-opus-4-5",
+        "claude-opus-4-6",
+        "claude-haiku",
+        "claude-3",
+    )
 
     def __init__(self, api_key: str, model: Optional[str] = None):
         """
@@ -80,15 +93,26 @@ class ChronologyAgent:
         """
         base_delay = 2  # Start with 2 second delay
 
+        # temperature is only sent to models that still support it; newer
+        # models (Opus 4.7+, Claude 5 family) return a 400 if it is present
+        request_kwargs = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if self.model.startswith(self._TEMPERATURE_SUPPORTED_PREFIXES):
+            request_kwargs["temperature"] = 0
+
         for attempt in range(max_retries):
             try:
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=max_tokens,
-                    temperature=0,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                return response.content[0].text.strip()
+                response = self.client.messages.create(**request_kwargs)
+                # Newer models may include thinking blocks in content;
+                # extract only the text blocks
+                text_parts = [
+                    block.text for block in response.content
+                    if getattr(block, "type", None) == "text"
+                ]
+                return "\n".join(text_parts).strip()
 
             except (APIError, APIStatusError) as e:
                 error_message = str(e).lower()
@@ -534,7 +558,9 @@ Severity: [Critical/Moderate/Minor]
 If an entry is correct, DO NOT output anything for it.
 If no issues found in any entries, output "No issues found."
 """
-        return self._call_api_with_retry(prompt, max_tokens=4000)
+        # Generous budget: on reasoning models, thinking tokens count
+        # against max_tokens, so leave headroom above the expected output
+        return self._call_api_with_retry(prompt, max_tokens=8000)
 
     def verify_chronology(
         self,
@@ -758,8 +784,9 @@ For all other visit types (general medical, follow-ups, etc.):
 Write chronology entries in proper format, one entry per document/visit.
 Do NOT include header or JSON - just the chronology entries."""
 
-        # Call Claude with retry logic
-        return self._call_api_with_retry(prompt, max_tokens=8000)
+        # Call Claude with retry logic. Generous budget: on reasoning models,
+        # thinking tokens count against max_tokens
+        return self._call_api_with_retry(prompt, max_tokens=16000)
 
     # ------------------------------------------------------------------ batches
     def _plan_batches(self, documents: List[Dict]) -> List[List[Dict]]:
@@ -921,7 +948,7 @@ Do NOT include header or JSON - just the chronology entries."""
             'Respond with ONLY the JSON object, no code fences, no commentary.'
         )
         try:
-            raw = self._call_api_with_retry(prompt, max_tokens=500)
+            raw = self._call_api_with_retry(prompt, max_tokens=2000)
             # Strip potential code fences defensively
             raw = raw.strip()
             if raw.startswith("```"):
@@ -981,7 +1008,7 @@ Do NOT include header or JSON - just the chronology entries."""
             "chronology. Do NOT include preambles."
         )
         try:
-            raw = self._call_api_with_retry(prompt, max_tokens=3000)
+            raw = self._call_api_with_retry(prompt, max_tokens=8000)
             if "===GAPS===" in raw:
                 summary_part, gaps_part = raw.split("===GAPS===", 1)
             else:
