@@ -71,7 +71,9 @@ RULES:
 6. fact_category must be one of: chief_complaint, history, physical_exam, assessment, diagnosis, plan, medication, procedure_performed, imaging_finding, lab_result, referral, work_status, patient_quote, other.
 7. extraction_confidence must be one of: high, medium, low.
 8. visit_date, when stated explicitly, should be in MM/DD/YYYY format. If only month-day or partial date is present, set it to null.
-9. Output a single JSON object matching the ChunkExtraction schema. No preamble, no markdown fences, no commentary.
+9. visit_type must be as SPECIFIC as the source allows. For therapy records, name the therapy type exactly as documented (e.g. "physical therapy", "occupational therapy", "chiropractic", "speech therapy", "psychotherapy"), never bare "therapy". For imaging reports, name the modality and body part (e.g. "MRI lumbar spine", "X-ray right knee", "CT head"), never bare "imaging".
+10. Billing and administrative content (itemized charges, CPT code lists, invoices, account statements, superbills, payment records) is NOT clinical documentation. If a chunk contains billing content, extract at most one fact per date of service with fact_category "other" and finding_text beginning with "Billing record:" naming the billed service. Never extract charge amounts, CPT codes, or payment details as clinical facts, and never infer clinical findings from billing line items.
+11. Output a single JSON object matching the ChunkExtraction schema. No preamble, no markdown fences, no commentary.
 
 SCHEMA:
 {schema}

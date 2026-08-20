@@ -157,7 +157,7 @@ def generate_summary_and_gaps(
         )
     summary_prompt = build_summary_prompt(chronology_md)
     summary_text = anthropic_client.complete(
-        summary_prompt, model=model, max_tokens=2000
+        summary_prompt, model=model, max_tokens=6000
     ).strip()
     summary_path.write_text(summary_text + "\n", encoding="utf-8")
 
@@ -175,7 +175,7 @@ def generate_summary_and_gaps(
         )
     gaps_prompt = build_gaps_prompt(signals, low_conf)
     gaps_text = anthropic_client.complete(
-        gaps_prompt, model=model, max_tokens=1500
+        gaps_prompt, model=model, max_tokens=4000
     ).strip()
     gaps_path.write_text(gaps_text + "\n", encoding="utf-8")
 

@@ -52,17 +52,48 @@ MAX_FACTS_PER_VISIT_GROUP = 250
 APPROX_CHARS_PER_FACT = 600
 
 
-# Consolidated key: (visit_date, visit_category).
+# Consolidated key: (visit_date, visit_category, facility_root).
 #
-# Facility is intentionally NOT part of the key: the same encounter is often
-# recorded under slightly different facility names ("Sharp Rees-Stealy" vs
-# "Sharp Rees-Stealy DFR" vs "Sharp Rees-Stealy Medical Group") and must not be
-# split into duplicate entries. visit_category keeps ER visits separate from
-# everything else — office visits, follow-ups, consults, urgent care, etc. all
-# collapse into a single entry per date — per the desired output. The actual
+# visit_category separates genuinely different kinds of encounters on the
+# same date — Emergency, Imaging, Therapy, Procedure, and Visit (everything
+# else) — so an office visit and an MRI on the same day produce two entries
+# instead of being blended into one. facility_root is a NORMALIZED facility
+# stem (not the raw name): variants like "Sharp Rees-Stealy" vs "Sharp
+# Rees-Stealy DFR" vs "Sharp Rees-Stealy Medical Group" normalize to the
+# same root and still merge, while visits at genuinely different facilities
+# on the same date stay separate entries. Facts with no facility are
+# backfilled from their source document before grouping, then clustered
+# with same-document facts, so one record never fragments. The actual
 # facility name and visit_type label shown in the entry are chosen from the
 # group's facts (most common value), not from the key.
-ConsolidatedVisitKey = Tuple[str, str]
+ConsolidatedVisitKey = Tuple[str, str, str]
+
+# Generic tokens dropped when normalizing a facility name to its root, so
+# name variants of the same institution compare equal.
+_FACILITY_STOPWORDS = {
+    "medical", "group", "center", "centre", "clinic", "clinics", "hospital",
+    "health", "healthcare", "system", "associates", "institute", "office",
+    "offices", "inc", "llc", "llp", "pc", "of", "the", "and", "at", "dba",
+    "dfr", "corp", "corporation", "ltd",
+}
+
+# Billing/administrative language. A non-clinical fact matching this pattern
+# is treated as billing-derived: dropped when the same date has clinical
+# facts, kept (minimally) when a date exists only in billing records.
+_BILLING_RE = re.compile(
+    r"\b(cpt|billing|billed|invoice|itemized|superbill|ledger|"
+    r"balance due|amount due|statement of charges|account statement|"
+    r"payment received|charge amount)\b",
+    re.IGNORECASE,
+)
+
+# Fact categories that constitute clinical documentation (vs. billing or
+# administrative content, which lands in "other"/"patient_quote").
+_CLINICAL_CATEGORIES = {
+    "chief_complaint", "history", "physical_exam", "assessment", "diagnosis",
+    "plan", "medication", "procedure_performed", "imaging_finding",
+    "lab_result", "referral", "work_status",
+}
 
 # Higher rank wins when choosing the single provider to attribute a visit to:
 # attending physician (MD/DO) over mid-levels (PA/NP) over nursing (RN) over
@@ -76,18 +107,144 @@ _PROVIDER_RANK = {
 }
 
 
+_IMAGING_VT_RE = re.compile(
+    r"\b(imaging|mri|ct|x[- ]?ray|xr|ultrasound|radiology|radiologic|"
+    r"fluoroscopy|myelogram|emg|ncv|nerve conduction)\b",
+    re.IGNORECASE,
+)
+_THERAPY_VT_RE = re.compile(
+    r"\b(therapy|therapeutic|chiropractic|chiro|rehab|rehabilitation|"
+    r"acupuncture|pt|ot|slp)\b",
+    re.IGNORECASE,
+)
+_PROCEDURE_VT_RE = re.compile(
+    r"\b(operative|surgery|surgical|procedure|injection|epidural|"
+    r"esi|tfesi|rfa|ablation|discogram)\b",
+    re.IGNORECASE,
+)
+
+
 def _visit_category(visit_type: Optional[str]) -> str:
-    """Bucket a raw visit_type for grouping. Only ER visits stay distinct."""
+    """Bucket a raw visit_type for grouping.
+
+    Emergency, Imaging, Therapy, and Procedure encounters each stay
+    distinct from office/clinic visits so that multiple different visits
+    on the same date of service each get their own chronology entry.
+    """
     vt = (visit_type or "").strip().lower()
     if "emerg" in vt or vt in {"er", "ed", "er visit", "ed visit"}:
         return "Emergency"
+    if _IMAGING_VT_RE.search(vt):
+        return "Imaging"
+    if _THERAPY_VT_RE.search(vt):
+        return "Therapy"
+    if _PROCEDURE_VT_RE.search(vt):
+        return "Procedure"
     return "Visit"
+
+
+def _facility_root(facility: Optional[str]) -> str:
+    """Normalize a facility name to a short comparable stem.
+
+    Lowercases, strips punctuation, drops generic words (medical, group,
+    center...), and keeps the first two remaining tokens. Name variants of
+    one institution ("Sharp Rees-Stealy" / "Sharp Rees-Stealy DFR Medical
+    Group") produce the same root; different institutions do not.
+    """
+    if not facility:
+        return ""
+    text = re.sub(r"[^a-z0-9\s]", " ", facility.lower())
+    tokens = [t for t in text.split() if t and t not in _FACILITY_STOPWORDS]
+    return " ".join(tokens[:2])
+
+
+def _backfill_facilities(facts: List[VerifiedFact]) -> None:
+    """Fill missing facility names from the fact's own source document.
+
+    A facility is typically named once at the top of a record, so facts
+    extracted from later chunks of the same file carry facility=None.
+    Backfilling from the same source file (never from other documents)
+    keeps every fact attributed to the facility its own record names,
+    which prevents entries from showing a different record's facility.
+    Mutates the facts in place.
+    """
+    by_file: Dict[str, List[VerifiedFact]] = defaultdict(list)
+    for f in facts:
+        by_file[f.source_file].append(f)
+    for group in by_file.values():
+        common = _most_common([f.facility for f in group])
+        if not common:
+            continue
+        for f in group:
+            if not f.facility:
+                f.facility = common
+
+
+def _is_billing_fact(fact: VerifiedFact) -> bool:
+    """True when a fact appears billing/administrative rather than clinical."""
+    if fact.fact_category in _CLINICAL_CATEGORIES:
+        return False
+    text = " ".join(
+        filter(None, [fact.visit_type, fact.finding_text, fact.verbatim_quote])
+    )
+    return bool(_BILLING_RE.search(text))
+
+
+def _drop_billing_when_clinical(facts: List[VerifiedFact]) -> Tuple[List[VerifiedFact], int]:
+    """Drop billing-derived facts on dates that also have clinical facts.
+
+    Chronology entries must be built from the clinical record, never from
+    the billing record, when both exist for a date of service. Dates that
+    appear ONLY in billing records keep their billing facts so the
+    chronology can note the billed service instead of silently omitting
+    the date.
+    """
+    clinical_dates = {
+        (f.visit_date or "").strip()
+        for f in facts
+        if not _is_billing_fact(f)
+    }
+    kept: List[VerifiedFact] = []
+    dropped = 0
+    for f in facts:
+        if _is_billing_fact(f) and (f.visit_date or "").strip() in clinical_dates:
+            dropped += 1
+            continue
+        kept.append(f)
+    return kept, dropped
 
 
 def _consolidated_key_for_fact(fact: VerifiedFact) -> ConsolidatedVisitKey:
     # Strip the date so whitespace/format variance ("10/10/2022" vs
     # "10/10/2022 ") doesn't split one date of service into two entries.
-    return ((fact.visit_date or "").strip(), _visit_category(fact.visit_type))
+    return (
+        (fact.visit_date or "").strip(),
+        _visit_category(fact.visit_type),
+        _facility_root(fact.facility),
+    )
+
+
+def _merge_unknown_facility_groups(
+    groups: Dict[ConsolidatedVisitKey, List[VerifiedFact]],
+) -> Dict[ConsolidatedVisitKey, List[VerifiedFact]]:
+    """Fold facts with no facility into a named group for the same
+    date+category when exactly one exists, so an unknown-facility fragment
+    doesn't produce a duplicate entry alongside the named one. With more
+    than one named candidate the unknown group stays separate rather than
+    guessing."""
+    merged: Dict[ConsolidatedVisitKey, List[VerifiedFact]] = {}
+    for key, facts in groups.items():
+        date, category, root = key
+        if root == "":
+            named = [
+                k for k in groups
+                if k[0] == date and k[1] == category and k[2] != ""
+            ]
+            if len(named) == 1:
+                merged.setdefault(named[0], []).extend(facts)
+                continue
+        merged.setdefault(key, []).extend(facts)
+    return merged
 
 
 def _most_common(values: List[Optional[str]]) -> Optional[str]:
@@ -136,16 +293,17 @@ def _pick_primary_provider(
     return best, by_name[best]["cred"]
 
 
-def _sort_key(key: ConsolidatedVisitKey) -> Tuple[int, str]:
-    """Sort dated visits ascending; undated visits sort last."""
-    date_str = key[0]
+def _sort_key(key: ConsolidatedVisitKey) -> Tuple[int, str, str, str]:
+    """Sort dated visits ascending; undated visits sort last. Same-date
+    visits order deterministically by category then facility root."""
+    date_str, category, root = key
     if not date_str:
-        return (1, "")
+        return (1, "", category, root)
     try:
         dt = datetime.strptime(date_str, "%m/%d/%Y")
-        return (0, dt.isoformat())
+        return (0, dt.isoformat(), category, root)
     except ValueError:
-        return (0, date_str)
+        return (0, date_str, category, root)
 
 
 def _sub_group_by_provider(
@@ -305,9 +463,23 @@ def run_assembly(
     if duplicates_dropped:
         log.info("Assembly: dropped %d duplicate facts after dedup", duplicates_dropped)
 
-    groups: Dict[ConsolidatedVisitKey, List[VerifiedFact]] = defaultdict(list)
+    # Fill facility gaps from each fact's own source document, so records
+    # that name the facility only once attribute every entry correctly.
+    _backfill_facilities(facts)
+
+    # Clinical records beat billing records: drop billing-derived facts on
+    # any date of service that also has clinical documentation.
+    facts, billing_dropped = _drop_billing_when_clinical(facts)
+    if billing_dropped:
+        log.info(
+            "Assembly: dropped %d billing-derived facts on dates with clinical records",
+            billing_dropped,
+        )
+
+    grouped: Dict[ConsolidatedVisitKey, List[VerifiedFact]] = defaultdict(list)
     for fact in facts:
-        groups[_consolidated_key_for_fact(fact)].append(fact)
+        grouped[_consolidated_key_for_fact(fact)].append(fact)
+    groups = _merge_unknown_facility_groups(grouped)
 
     ordered_keys = sorted(groups.keys(), key=_sort_key)
 
@@ -361,8 +533,10 @@ def run_assembly(
             prompt = build_assembly_prompt(
                 visit_key, visit_facts, known_credentials=credential_lookup
             )
+            # Generous budget: on reasoning models, thinking tokens count
+            # against max_tokens, so leave headroom above the expected output.
             text = anthropic_client.complete(
-                prompt, model=model, max_tokens=3000
+                prompt, model=model, max_tokens=8000
             ).strip()
             # Strip stray "Provider:" prefix the model sometimes adds
             text = re.sub(r"^Provider:\s*", "", text)

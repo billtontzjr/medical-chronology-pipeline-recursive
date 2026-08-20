@@ -4,11 +4,11 @@ Ported from the predecessor's ChronologyAgent._call_api_with_retry. The
 client enforces two invariants that are load-bearing for the rest of the
 pipeline:
 
-* Temperature is always zero. No call in this codebase uses a non-zero
-  temperature. Deterministic output is required for verifier-driven
-  workflows.
+* Deterministic-leaning output: temperature=0 is sent to models that
+  still support sampling parameters; newer models (Opus 4.7+, Claude 5
+  family) reject temperature and use reasoning mode instead.
 * Per-call model selection. The extraction stage and the assembly stage
-  may use different models. Default for both is claude-sonnet-4-6; the
+  may use different models. Default for both is claude-opus-5; the
   ANTHROPIC_MODEL env var overrides the default.
 
 Exponential backoff with jitter handles overload (HTTP 500 with
@@ -32,7 +32,19 @@ except ImportError as exc:  # pragma: no cover - import guard
     ) from exc
 
 
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-opus-5"
+
+# Models that still accept sampling parameters (temperature). Opus 4.7+ and
+# the Claude 5 family reject temperature with a 400 error; reasoning mode
+# replaces it as the consistency mechanism on those models.
+_TEMPERATURE_SUPPORTED_PREFIXES = (
+    "claude-sonnet-4-5",
+    "claude-sonnet-4-6",
+    "claude-opus-4-5",
+    "claude-opus-4-6",
+    "claude-haiku",
+    "claude-3",
+)
 
 
 class AnthropicClient:
@@ -106,13 +118,24 @@ class AnthropicClient:
                 kwargs = dict(
                     model=chosen_model,
                     max_tokens=max_tokens,
-                    temperature=0,
                     messages=[{"role": "user", "content": prompt}],
                 )
+                # temperature=0 only on models that still support sampling
+                # params; newer models (Opus 4.7+, Claude 5 family) return
+                # a 400 if temperature is present.
+                if chosen_model.startswith(_TEMPERATURE_SUPPORTED_PREFIXES):
+                    kwargs["temperature"] = 0
                 if system is not None:
                     kwargs["system"] = system
                 response = self._client.messages.create(**kwargs)
-                return response.content[0].text.strip()
+                # Newer models may include thinking blocks in content;
+                # extract only the text blocks.
+                text_parts = [
+                    block.text
+                    for block in response.content
+                    if getattr(block, "type", None) == "text"
+                ]
+                return "\n".join(text_parts).strip()
 
             except (APIError, APIStatusError) as exc:
                 msg = str(exc).lower()

@@ -89,9 +89,14 @@ ABBREVIATION RULES:
 
 VISIT TYPE RULES:
 - Use the visit type as named in the source records, with title case. Match what the source document calls the visit.
-- Examples of acceptable visit type labels: Initial Report, Progress Note, Established Patient Visit, New Patient Visit, ED Provider Note, Discharge Summary, Operative Report, Chiropractic Initial Report, Chiropractic Re-Evaluation Note, Chiropractic Final Report, Physical Therapy Initial Evaluation, Physical Therapy Progress Note, Physical Therapy Discharge Summary, Follow-up, Telehealth, Office Visit (only when source does not specify more specific type), Imaging, Procedure Note.
-- For imaging visits, include the specific study in the visit type label when known from verified facts (e.g., "MRI Cervical Spine without Contrast", "X-ray of Cervical Spine 5 Views", "MRI Brain without Contrast").
+- Examples of acceptable visit type labels: Initial Report, Progress Note, Established Patient Visit, New Patient Visit, ED Provider Note, Discharge Summary, Operative Report, Chiropractic Initial Report, Chiropractic Re-Evaluation Note, Chiropractic Final Report, Physical Therapy Initial Evaluation, Physical Therapy Progress Note, Physical Therapy Discharge Summary, Follow-up, Telehealth, Office Visit (only when source does not specify more specific type), Procedure Note.
+- THERAPY VISITS: always name the SPECIFIC therapy type in the visit type label and narrative when the verified facts identify it: Physical Therapy, Occupational Therapy, Chiropractic, Speech Therapy, Psychological/Psychotherapy, Trauma Therapy. NEVER write bare "Therapy" or "Therapy Visit" when the facts show the type. If the facts genuinely do not identify the type, write "Therapy (type not specified in record)".
+- IMAGING VISITS: NEVER use bare "Imaging" as the visit type label. Always name the modality AND body part from the verified facts (e.g., "MRI Cervical Spine without Contrast", "X-ray of Cervical Spine 5 Views", "CT Lumbar Spine"). When the verified facts include the radiologist's impression or findings, the entry body MUST state them (e.g., "Impression: ..."). An imaging entry that names no modality or body part is incomplete.
 - Abbreviations within visit type labels should preserve fully-capitalized abbreviations exactly as commonly written (BP not Bp, ED not Ed, MRI not Mri, CT not Ct, EKG not Ekg, IV not Iv). Apply title case only to non-abbreviation words. Examples: "BP Check Telehealth" (not "Bp Check Telehealth"), "CT Chest" (not "Ct Chest"), "IV Push Procedure" (not "Iv Push Procedure").
+
+BILLING RULES:
+- Do NOT narrate billing or administrative content (CPT codes, charge amounts, payments, account balances) as clinical care.
+- If the verified facts for this visit consist ONLY of billing records with no clinical documentation, produce a single short sentence after the header stating that the service was billed and no clinical note is available in the records. Do not fabricate clinical detail from billing line items.
 
 DATE FORMATTING IN ENTRY BODY:
 - Any specific date (month + day + year) appearing in the entry body must be rewritten as MM/DD/YYYY with four-digit year and zero-padded month and day. Examples: "March 26, 2025" -> "03/26/2025", "03/06/25" -> "03/06/2025".

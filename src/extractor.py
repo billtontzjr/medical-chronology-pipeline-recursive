@@ -306,7 +306,9 @@ def run_extraction(
                 chunk_start_char=piece.start_char,
                 chunk_end_char=piece.end_char,
             )
-            raw = anthropic_client.complete(prompt, model=model, max_tokens=8000)
+            # Generous budget: on reasoning models, thinking tokens count
+            # against max_tokens, so leave headroom above the JSON output.
+            raw = anthropic_client.complete(prompt, model=model, max_tokens=16000)
             cleaned = _strip_md_fence(raw)
 
             try:
