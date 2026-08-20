@@ -220,13 +220,44 @@ class ChronologyAgent:
 
         return f"{header}\n{body}"
 
+    def _is_billing_entry(self, entry: str) -> bool:
+        """
+        Detect whether an entry was built from billing/administrative content
+        rather than a clinical record.
+
+        Args:
+            entry: A chronology entry string
+
+        Returns:
+            True if the entry appears to be billing-derived
+        """
+        entry_lower = entry.lower()
+
+        # Clinical entries contain exam/assessment content
+        clinical_markers = [
+            'chief complaint:', 'history of present illness:', 'physical examination:',
+            'assessment:', 'plan:', 'impression:', 'examination:', 'history:'
+        ]
+        has_clinical_content = any(marker in entry_lower for marker in clinical_markers)
+
+        billing_markers = [
+            'billing', 'invoice', 'itemized statement', 'charges', 'cpt',
+            'billed', 'payment', 'ledger', 'account statement', 'balance due',
+            'statement of charges', 'superbill'
+        ]
+        has_billing_content = any(marker in entry_lower for marker in billing_markers)
+
+        return has_billing_content and not has_clinical_content
+
     def _deduplicate_entries(self, entries: List[str]) -> List[str]:
         """
-        Remove duplicate entries and merge entries for the same date/facility/provider.
+        Remove duplicate entries for the same date/facility/provider.
 
-        When duplicates are found (same date, facility, and provider), the longest
-        entry is kept. If entries share the same date and facility but different
-        providers, both are kept (they represent different visits).
+        When duplicates are found, clinical entries are always preferred over
+        billing-derived entries; among entries of the same kind, the longest
+        (most detailed) is kept. Entries sharing a date but with different
+        facilities or providers are all kept, since they represent distinct
+        visits that each belong in the chronology.
 
         Args:
             entries: List of chronology entry strings
@@ -247,14 +278,22 @@ class ChronologyAgent:
             if key in seen:
                 duplicates_removed += 1
                 existing = seen[key]
-                # Keep the longer/more detailed entry
-                if len(entry) > len(existing):
+                existing_is_billing = self._is_billing_entry(existing)
+                entry_is_billing = self._is_billing_entry(entry)
+
+                # Clinical content always wins over billing content
+                if existing_is_billing and not entry_is_billing:
+                    seen[key] = entry
+                elif entry_is_billing and not existing_is_billing:
+                    pass  # keep existing clinical entry
+                elif len(entry) > len(existing):
+                    # Same kind: keep the longer/more detailed entry
                     seen[key] = entry
             else:
                 seen[key] = entry
 
         if duplicates_removed > 0:
-            self.logger.info(f"Removed {duplicates_removed} duplicate entries")
+            self.logger.info(f"Removed {duplicates_removed} duplicate entries (clinical preferred over billing)")
 
         return list(seen.values())
 
@@ -269,11 +308,21 @@ class ChronologyAgent:
         Returns:
             Sorted, deduplicated entries joined with double newlines
         """
-        # Split into individual entries (separated by double newlines)
-        entries = [e.strip() for e in entries_text.split('\n\n') if e.strip()]
+        # Split into fragments (separated by double newlines)
+        fragments = [e.strip() for e in entries_text.split('\n\n') if e.strip()]
 
-        if not entries:
+        if not fragments:
             return entries_text
+
+        # Step 0: Reattach continuation fragments. A multi-paragraph entry gets
+        # split apart here because its body paragraphs don't start with a date —
+        # rejoin any fragment lacking a leading MM/DD/YYYY to the entry before it.
+        entries: List[str] = []
+        for fragment in fragments:
+            if self._parse_entry_date(fragment) is None and entries:
+                entries[-1] = entries[-1] + '\n' + fragment
+            else:
+                entries.append(fragment)
 
         # Step 1: Enforce single-paragraph format on each entry
         entries = [self._enforce_single_paragraph(e) for e in entries]
@@ -315,6 +364,11 @@ class ChronologyAgent:
         """
         Split a large document into smaller chunks.
 
+        Each chunk after the first is prefixed with the document's opening text
+        as reference context, because facility/provider/patient identifiers
+        typically appear only once at the top of a record. Without this,
+        later chunks lose the facility name and entries get misattributed.
+
         Args:
             filename: Original filename
             content: Document content
@@ -325,6 +379,17 @@ class ChronologyAgent:
         """
         if len(content) <= max_chunk_chars:
             return [{'filename': filename, 'content': content}]
+
+        # Capture the document opening (usually contains facility name,
+        # provider, and patient identifiers) to carry into later chunks
+        header_context = content[:1500].strip()
+        context_block = (
+            "[REFERENCE CONTEXT - DOCUMENT HEADER FROM START OF THIS FILE. "
+            "Use ONLY to identify the facility, provider, and patient for entries "
+            "from this chunk. Do NOT create chronology entries from this context block.]\n"
+            f"{header_context}\n"
+            "[END REFERENCE CONTEXT]\n\n"
+        )
 
         # Split into chunks
         chunks = []
@@ -338,6 +403,9 @@ class ChronologyAgent:
                 # Save current chunk
                 chunk_text = ' '.join(current_chunk)
                 chunk_num = len(chunks) + 1
+                # Prefix continuation chunks with the document header context
+                if chunk_num > 1:
+                    chunk_text = context_block + chunk_text
                 chunks.append({
                     'filename': f"{filename} (part {chunk_num})",
                     'content': chunk_text
@@ -352,12 +420,14 @@ class ChronologyAgent:
         if current_chunk:
             chunk_text = ' '.join(current_chunk)
             chunk_num = len(chunks) + 1
+            if chunk_num > 1:
+                chunk_text = context_block + chunk_text
             chunks.append({
                 'filename': f"{filename} (part {chunk_num})",
                 'content': chunk_text
             })
 
-        self.logger.info(f"Split {filename} into {len(chunks)} chunks")
+        self.logger.info(f"Split {filename} into {len(chunks)} chunks (header context carried into continuation chunks)")
         return chunks
 
     def _read_extracted_files(self, input_dir: str) -> List[Dict[str, str]]:
@@ -634,13 +704,37 @@ For all other visit types (general medical, follow-ups, etc.):
 - Include Plan
 - Keep other details minimal
 
-**3. DUPLICATE PREVENTION (CRITICAL):**
+**3. DUPLICATE PREVENTION & SAME-DATE VISITS (CRITICAL):**
 - Create ONLY ONE entry per unique date + facility + provider combination
 - If multiple pages or sections of a document refer to the same visit, merge them into a SINGLE entry
 - Do NOT create separate entries for different sections (e.g., history, exam, plan) of the SAME visit
 - If two documents describe the same visit on the same date at the same facility, produce ONE combined entry
+- HOWEVER: If the SAME DATE has multiple DISTINCT visits (different providers, different facilities, or clearly separate encounters such as an office visit AND an imaging study), create a SEPARATE entry for EACH distinct visit. Do not skip or merge genuinely different visits just because they share a date.
 
-**4. FORMATTING RULES (MAINTAIN CURRENT FORMAT):**
+**4. BILLING RECORDS (CRITICAL):**
+- When a file contains BOTH billing/administrative records AND clinical records (chief complaint, HPI, exam, assessment) for the same date of service, ALWAYS build the entry from the CLINICAL record — NEVER from the billing record
+- Billing content includes: CPT codes, charge lists, itemized statements, ledgers, invoices, superbills, payment records
+- NEVER create an entry from billing content alone when a clinical note exists for that visit
+- If a date of service appears ONLY in billing records with no clinical note, do not fabricate clinical details — state only that the service was billed (e.g., "Office visit billed; no clinical note available in records.")
+
+**5. FACILITY ATTRIBUTION (CRITICAL):**
+- Many records state the facility name ONLY ONCE at the top of the document. Carry that facility name forward and use it for EVERY entry generated from that document, including entries for later dates of service in the same document
+- If a chunk begins with a [REFERENCE CONTEXT] block, use the facility, provider, and patient information from that block to attribute entries — but do NOT create entries from the context block itself
+- NEVER guess, invent, or substitute a facility name. If the facility genuinely cannot be determined from the document, write "Facility not documented" in the header
+- Do not use a facility name from a DIFFERENT document for entries from this one
+
+**6. THERAPY VISITS (CRITICAL):**
+- ALWAYS specify the TYPE of therapy in both the header and the summary when the record identifies it: physical therapy, occupational therapy, speech therapy, chiropractic therapy, psychological/psychotherapy, trauma therapy, etc.
+- Example header: "Visit Type: Physical Therapy Initial Evaluation" — never just "Therapy"
+- If the record does not specify the therapy type, write "Therapy (type not specified in record)"
+
+**7. IMAGING STUDIES (CRITICAL):**
+- The entry header MUST state the imaging MODALITY and BODY PART, e.g., "MRI of the Lumbar Spine without Contrast", "X-ray of the Right Knee", "CT of the Cervical Spine"
+- NEVER write just "Imaging" as the visit type or reason
+- The summary MUST include the radiologist's Impression/Conclusion: "Impression: [text from report]."
+- If an office visit note documents that imaging was ordered or reviewed, mention the modality and body part in that visit's entry as well
+
+**8. FORMATTING RULES (MAINTAIN CURRENT FORMAT):**
 - Each date of service entry MUST be ONE CONTINUOUS PARAGRAPH with NO line breaks within the entry
 - All labels (Provider:, Chief Complaint:, Assessment:, Plan:, etc.) flow together in the same paragraph
 - The ONLY separator between different date entries is a SINGLE blank line
@@ -651,7 +745,7 @@ For all other visit types (general medical, follow-ups, etc.):
 - Tone: Direct, factual, clinical language with in-paragraph headings
 - No bulleted lists: Convert all bullets to flowing sentences
 - Imaging reports: Include only Impression section
-- Therapy notes: Consolidate multiple follow-up sessions into one entry listing all dates"""
+- Therapy notes: Consolidate multiple routine follow-up sessions into one entry listing all dates, always stating the therapy type"""
 
         prompt = f"""Generate chronology entries from these {len(documents)} medical documents.
 
