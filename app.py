@@ -34,7 +34,9 @@ from src.session_state import (
 
 load_dotenv()
 
-MODEL_OPTIONS = ["claude-sonnet-4-6", "claude-opus-4-7"]
+# First entry is the default for new runs and the fallback for resumed
+# sessions. Opus 5 is the most accurate option for medical-legal work.
+MODEL_OPTIONS = ["claude-opus-5", "claude-sonnet-4-6", "claude-opus-4-7"]
 
 PHASE_LABELS = [
     "Downloading PDFs from Dropbox",
