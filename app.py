@@ -338,16 +338,77 @@ def _render_disk_gauge(pipeline: PrecisionChronologyPipeline) -> None:
         st.caption(f"Disk: {used_gb:.2f} / {total_gb:.2f} GB used ({pct * 100:.0f}%)")
 
 
+def _process_pending_deletes(pipeline: PrecisionChronologyPipeline) -> None:
+    """Execute deletes queued by button clicks BEFORE anything renders.
+
+    The Sessions tab auto-refreshes while a run is active, and a click
+    that races the refresh can be dropped. Buttons therefore only queue
+    the session id in st.session_state; the actual delete happens here,
+    at the top of the next script run, where it cannot be lost.
+    """
+    pending = st.session_state.pop("pending_delete", None)
+    if pending:
+        try:
+            pipeline.store.delete(pending)
+            st.success(f"Session {pending} permanently deleted.")
+        except OSError as exc:
+            st.error(str(exc))
+
+    if st.session_state.pop("pending_delete_all_completed", False):
+        deleted, failed = [], []
+        for sess in pipeline.list_sessions():
+            if sess.status == STATUS_COMPLETE:
+                try:
+                    pipeline.store.delete(sess.session_id)
+                    deleted.append(sess.session_id)
+                except OSError:
+                    failed.append(sess.session_id)
+        if deleted:
+            st.success(
+                f"Permanently deleted {len(deleted)} completed session(s): "
+                + ", ".join(deleted)
+            )
+        if failed:
+            st.error("Could not delete: " + ", ".join(failed))
+        if not deleted and not failed:
+            st.info("No completed sessions to delete.")
+
+
 def _sessions_tab(pipeline: PrecisionChronologyPipeline) -> None:
     st.subheader("Sessions")
+    _process_pending_deletes(pipeline)
     _render_disk_gauge(pipeline)
     sessions = pipeline.list_sessions()
     if not sessions:
         st.info("No sessions yet. Start one in the New Run tab.")
         return
 
-    # Auto-refresh when any session is in progress
-    any_running = any(s.status == STATUS_IN_PROGRESS for s in sessions)
+    # Auto-refresh only when a pipeline thread is genuinely alive. A session
+    # left at in_progress by an app restart (dead thread) must not keep the
+    # tab in a refresh loop — that loop is what swallowed button clicks.
+    any_running = any(
+        s.status == STATUS_IN_PROGRESS and pipeline.is_running(s.session_id)
+        for s in sessions
+    )
+
+    completed_count = sum(1 for s in sessions if s.status == STATUS_COMPLETE)
+    if completed_count:
+        with st.expander(f"🗑️ Bulk cleanup ({completed_count} completed session(s))"):
+            st.caption(
+                "Outputs are already uploaded to Dropbox at the end of each "
+                "run. Deleting here permanently removes the session's PDFs, "
+                "OCR text, extracted facts, and outputs from this server's disk."
+            )
+            confirm_all = st.checkbox(
+                "I understand this permanently deletes all completed sessions "
+                "from the server",
+                key="confirm_delete_all",
+            )
+            if st.button(
+                "Delete ALL completed sessions", disabled=not confirm_all
+            ):
+                st.session_state["pending_delete_all_completed"] = True
+                st.rerun()
 
     for sess in sessions:
         badge = {
@@ -385,8 +446,16 @@ def _sessions_tab(pipeline: PrecisionChronologyPipeline) -> None:
                 pipeline.request_pause(sess.session_id)
                 st.success("Pause requested. The run will exit at the next phase boundary.")
             if col3.button("Delete", key=f"del_{sess.session_id}"):
-                pipeline.store.delete(sess.session_id)
-                st.rerun()
+                if pipeline.is_running(sess.session_id):
+                    st.warning(
+                        "This session is currently running. Pause it first, "
+                        "then delete."
+                    )
+                else:
+                    # Queue the delete; it executes at the top of the next
+                    # script run so the auto-refresh cannot swallow it.
+                    st.session_state["pending_delete"] = sess.session_id
+                    st.rerun()
             if col4.button(
                 "Re-run from assembly",
                 key=f"reasm_{sess.session_id}",

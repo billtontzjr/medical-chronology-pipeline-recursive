@@ -238,11 +238,29 @@ class SessionStore:
         return sessions
 
     def delete(self, session_id: str) -> None:
+        """Permanently remove a session directory and everything in it.
+
+        Retries to ride out transient filesystem races (e.g. a progress
+        write landing mid-delete), then verifies the directory is gone —
+        session data is confidential, so a silent partial delete is not
+        acceptable. Raises OSError if the directory survives all attempts.
+        """
         import shutil
+        import time as _time
 
         d = self.sessions_root / session_id
+        for attempt in range(3):
+            if not d.exists():
+                return
+            shutil.rmtree(d, ignore_errors=True)
+            if not d.exists():
+                return
+            _time.sleep(0.2 * (attempt + 1))
         if d.exists():
-            shutil.rmtree(d)
+            raise OSError(
+                f"Could not fully delete session {session_id}; "
+                f"files remain under {d}. A run may still be writing to it."
+            )
 
     def reset_from_phase(self, state: SessionState, phase: str) -> SessionState:
         """Mark ``phase`` and every later phase pending so a Resume re-runs them.
