@@ -107,6 +107,15 @@ class PrecisionChronologyPipeline:
     def _default_destination(self, session_id: str) -> str:
         return f"{DEFAULT_DESTINATION_PREFIX}/{session_id}"
 
+    def _resolve_destination(self, value: str) -> str:
+        """Normalize a destination; resolve via the Dropbox API only when it
+        is (or was mangled from) a URL. Plain folder paths never touch the
+        API. Raises ValueError for an unresolvable shared link."""
+        v = (value or "").strip()
+        if "dropbox.com" in v or v.startswith(("http://", "https://", "/https:/", "/http:/")):
+            return self.dropbox_tool.resolve_upload_folder(v)
+        return normalize_dropbox_folder(v)
+
     def create_session(
         self,
         dropbox_link: str,
@@ -131,7 +140,11 @@ class PrecisionChronologyPipeline:
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         session_id = f"{patient_id}_{timestamp}" if patient_id else timestamp
-        destination = normalize_dropbox_folder(
+        # Resolve shared links to real folder paths up front, so a pasted
+        # https://www.dropbox.com/scl/fo/... link uploads into the actual
+        # folder instead of a mangled literal path. Raises ValueError with
+        # a clear message if the link cannot be resolved.
+        destination = self._resolve_destination(
             destination_folder or self._default_destination(session_id)
         )
         return self.store.create(
@@ -155,7 +168,7 @@ class PrecisionChronologyPipeline:
 
     def update_destination(self, session_id: str, new_destination: str) -> SessionState:
         state = self.store.load(session_id)
-        state.destination_folder = normalize_dropbox_folder(new_destination)
+        state.destination_folder = self._resolve_destination(new_destination)
         up = state.phases.get(PHASE_UPLOAD)
         if up is not None:
             up.status = "pending"
@@ -503,7 +516,14 @@ class PrecisionChronologyPipeline:
         self, state: SessionState, cb: Callable[[str], None]
     ) -> None:
         output_dir = self.store.output_dir(state.session_id)
-        destination = normalize_dropbox_folder(state.destination_folder)
+        # Re-resolve at upload time: repairs destinations stored by older
+        # code that mangled pasted shared links into literal paths, and
+        # fails loudly instead of uploading into a junk folder.
+        destination = self._resolve_destination(state.destination_folder)
+        if destination != state.destination_folder:
+            state.destination_folder = destination
+            self.store.save(state)
+            cb(f"   ↳ destination resolved to {destination}")
         result = self.dropbox_tool.upload_folder(
             local_dir=str(output_dir),
             dropbox_folder=destination,

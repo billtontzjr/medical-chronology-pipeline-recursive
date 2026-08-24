@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -52,6 +53,22 @@ def dropbox_url_to_path(value: str) -> str:
         return unquote("/" + remaining) if remaining else "/"
     # Shared links or anything else — return as-is; not usable for direct upload
     return s
+
+
+def repair_mangled_destination(path: str) -> str:
+    """Recover the original URL from a destination that was mangled by
+    normalize_dropbox_folder.
+
+    Before shared-link resolution existed, a pasted shared link like
+    ``https://www.dropbox.com/scl/fo/...`` was stored as the literal
+    folder path ``/https:/www.dropbox.com/scl/fo/...``. This undoes that
+    mangling so the URL can be resolved properly. Returns the input
+    unchanged if it does not look mangled.
+    """
+    m = re.match(r"^/(https?):/(.+)$", path or "")
+    if m:
+        return f"{m.group(1)}://{m.group(2)}"
+    return path
 
 
 def normalize_dropbox_folder(path: str) -> str:
@@ -629,6 +646,45 @@ class DropboxTool:
             "local_path": local_path,
             "dropbox_path": dropbox_path,
         }
+
+    def resolve_upload_folder(self, value: str) -> str:
+        """Resolve a user-provided destination to a real Dropbox folder path.
+
+        Accepts a direct path (``/Team Folder/Chronologies``), a home URL
+        (``https://www.dropbox.com/home/...``), a shared link
+        (``https://www.dropbox.com/scl/fo/...``), or a previously-mangled
+        stored destination (``/https:/www.dropbox.com/...``). Shared links
+        are resolved through the API to the folder they point to, which
+        works for folders in (or shared into) this Dropbox account.
+
+        Raises ValueError for a shared link that cannot be resolved,
+        rather than silently uploading into a mangled literal path.
+        """
+        candidate = repair_mangled_destination((value or "").strip())
+        p = dropbox_url_to_path(candidate)
+        if not p:
+            return ""
+        if p.startswith("/"):
+            return normalize_dropbox_folder(p)
+        if p.startswith("http://") or p.startswith("https://"):
+            try:
+                meta = self.dbx.sharing_get_shared_link_metadata(url=p)
+                path = getattr(meta, "path_lower", None)
+                if path:
+                    logger.info(
+                        "Resolved shared link destination to Dropbox path %s", path
+                    )
+                    return normalize_dropbox_folder(path)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Shared-link destination resolution failed: %s", exc)
+            raise ValueError(
+                "The destination is a Dropbox shared link that could not be "
+                "resolved to a folder in this Dropbox account. Paste the "
+                "folder path instead (e.g. /Team Folder/Chronologies) or a "
+                "dropbox.com/home/... URL, or leave the field empty to use "
+                "the default output folder."
+            )
+        return normalize_dropbox_folder(p)
 
     def upload_folder(
         self,
