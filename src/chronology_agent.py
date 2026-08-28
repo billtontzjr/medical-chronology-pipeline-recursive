@@ -11,7 +11,6 @@ import logging
 
 try:
     from anthropic import Anthropic, APIError, APIStatusError
-    import httpx
 except ImportError:
     raise ImportError("anthropic package not installed. Run: pip install anthropic")
 
@@ -52,27 +51,13 @@ class ChronologyAgent:
 
         self.model = model or os.getenv("ANTHROPIC_MODEL") or self.DEFAULT_MODEL
 
-        # Configure HTTP client with aggressive retry and timeout settings
-        http_client = httpx.Client(
-            timeout=httpx.Timeout(
-                connect=60.0,    # 60s to establish connection
-                read=300.0,      # 5 minutes to read response
-                write=60.0,      # 60s to send request
-                pool=10.0        # 10s to get connection from pool
-            ),
-            limits=httpx.Limits(
-                max_connections=10,
-                max_keepalive_connections=5
-            ),
-            follow_redirects=True,
-            verify=True  # Verify SSL certificates
-        )
-
-        # Configure Anthropic client with custom HTTP client
+        # A plain float timeout is accepted by every SDK generation. Passing
+        # a custom httpx.Client breaks on the 1.x SDK, whose HTTP layer
+        # moved to httpx2 and rejects an httpx.Client instance.
         self.client = Anthropic(
             api_key=api_key,
-            http_client=http_client,
-            max_retries=5  # More retries for network issues
+            timeout=300.0,   # 5 minutes per request
+            max_retries=5,   # More retries for network issues
         )
         self.logger = logging.getLogger(__name__)
 
