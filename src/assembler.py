@@ -52,29 +52,59 @@ MAX_FACTS_PER_VISIT_GROUP = 250
 APPROX_CHARS_PER_FACT = 600
 
 
-# Consolidated key: (visit_date, visit_category, facility_root).
+# Consolidated key: (visit_date, visit_category, facility_cluster, subkey).
 #
-# visit_category separates genuinely different kinds of encounters on the
-# same date — Emergency, Imaging, Therapy, Procedure, and Visit (everything
-# else) — so an office visit and an MRI on the same day produce two entries
-# instead of being blended into one. facility_root is a NORMALIZED facility
-# stem (not the raw name): variants like "Sharp Rees-Stealy" vs "Sharp
-# Rees-Stealy DFR" vs "Sharp Rees-Stealy Medical Group" normalize to the
-# same root and still merge, while visits at genuinely different facilities
-# on the same date stay separate entries. Facts with no facility are
-# backfilled from their source document before grouping, then clustered
-# with same-document facts, so one record never fragments. The actual
-# facility name and visit_type label shown in the entry are chosen from the
-# group's facts (most common value), not from the key.
-ConsolidatedVisitKey = Tuple[str, str, str]
+# The grouping implements a per-date-of-service HIERARCHY:
+#   - The attending/primary physician's note for a care setting is the
+#     day's primary entry (subkey "").
+#   - Each distinct specialty CONSULTANT gets their own entry
+#     (subkey "consult:<provider>").
+#   - Each IMAGING study gets its own entry per modality, attributed to
+#     the interpreting radiologist (facility cluster ignored so the
+#     radiology department's separate name doesn't duplicate the study).
+#   - Procedures, Emergency visits, and Therapy stay their own categories.
+#   - Distinct care settings on one date (hospital vs SNF) are separate
+#     facility clusters and therefore separate entries.
+#   - ANCILLARY documentation (nursing, MDS, activities, social work,
+#     case management, pharmacy, telephone orders, orthotics) NEVER forms
+#     its own entry when the same date+setting has an entry-worthy note —
+#     it is folded into the primary entry. A date+setting with ONLY
+#     ancillary notes gets one consolidated entry (e.g. SNF daily care).
+#
+# facility_cluster is a session-wide cluster label: facility names that
+# share a distinctive token ("Geisinger" / "GMC-Geisinger Medical Center"
+# / "Geisinger Orthopaedics Woodbine") collapse into one cluster, while
+# genuinely different institutions stay separate. The facility name shown
+# in the entry is the most common raw value in the group, not the key.
+ConsolidatedVisitKey = Tuple[str, str, str, str]
 
-# Generic tokens dropped when normalizing a facility name to its root, so
-# name variants of the same institution compare equal.
+# Generic tokens dropped when tokenizing a facility name, so name variants
+# of the same institution compare equal AND so generic care/department
+# words cannot bridge two different institutions into one cluster (e.g.
+# "Guardian Long Term Care Pharmacy" must not merge with "Geisinger
+# Pharmacy Outpatient" via the word "pharmacy"). Only identity-bearing
+# tokens (proper names, places) survive.
 _FACILITY_STOPWORDS = {
+    # corporate/generic
     "medical", "group", "center", "centre", "clinic", "clinics", "hospital",
     "health", "healthcare", "system", "associates", "institute", "office",
     "offices", "inc", "llc", "llp", "pc", "of", "the", "and", "at", "dba",
-    "dfr", "corp", "corporation", "ltd",
+    "dfr", "corp", "corporation", "ltd", "community", "campus", "services",
+    "service", "management", "living", "senior", "wellness", "education",
+    "long", "term", "total", "practice", "primary", "family", "internal",
+    "medicine",
+    # care settings / departments — these describe WHAT a place does, not
+    # WHICH institution it is, so they must never link two names
+    "care", "pharmacy", "nursing", "skilled", "facility", "facilities",
+    "rehabilitation", "rehab", "outpatient", "inpatient", "consult",
+    "consults", "emergency", "department", "dept", "radiology", "imaging",
+    "laboratory", "therapy", "urgent",
+    # medical specialties
+    "orthopaedics", "orthopedics", "orthopaedic", "orthopedic", "urology",
+    "cardiology", "neurology", "oncology", "surgery", "surgical",
+    "psychiatry", "podiatry", "dermatology", "pediatrics", "ophthalmology",
+    "gastroenterology", "pulmonology", "nephrology", "obstetrics",
+    "gynecology",
 }
 
 # Billing/administrative language. A non-clinical fact matching this pattern
@@ -138,24 +168,97 @@ def _visit_category(visit_type: Optional[str]) -> str:
         return "Imaging"
     if _THERAPY_VT_RE.search(vt):
         return "Therapy"
+    # A consultation is a visit even when its title names a procedural
+    # specialty ("Orthopaedic Surgery Consultation" is a consult, not an
+    # operation) — check before the procedure keywords.
+    if _CONSULT_RE.search(vt):
+        return "Visit"
     if _PROCEDURE_VT_RE.search(vt):
         return "Procedure"
     return "Visit"
 
 
-def _facility_root(facility: Optional[str]) -> str:
-    """Normalize a facility name to a short comparable stem.
+def _facility_tokens(facility: Optional[str]) -> frozenset:
+    """Distinctive tokens of a facility name, for clustering.
 
-    Lowercases, strips punctuation, drops generic words (medical, group,
-    center...), and keeps the first two remaining tokens. Name variants of
-    one institution ("Sharp Rees-Stealy" / "Sharp Rees-Stealy DFR Medical
-    Group") produce the same root; different institutions do not.
+    Lowercases, strips punctuation, drops generic/department words and
+    short tokens. What remains are the identity-bearing tokens
+    ("geisinger", "laurel") that name variants of one institution share.
     """
     if not facility:
-        return ""
+        return frozenset()
     text = re.sub(r"[^a-z0-9\s]", " ", facility.lower())
-    tokens = [t for t in text.split() if t and t not in _FACILITY_STOPWORDS]
-    return " ".join(tokens[:2])
+    return frozenset(
+        t for t in text.split() if len(t) >= 4 and t not in _FACILITY_STOPWORDS
+    )
+
+
+def _cluster_facilities(facts: List[VerifiedFact]) -> Dict[str, str]:
+    """Cluster raw facility names session-wide by shared distinctive tokens.
+
+    Union-find: any two facility names sharing a distinctive token merge
+    into one cluster ("Geisinger" / "GMC-Geisinger Medical Center" /
+    "Geisinger Radiology"). Returns a map from raw facility name to a
+    stable cluster label (the most common raw name in the cluster,
+    lowercased). Names with no distinctive tokens map to themselves.
+    """
+    counts: Counter = Counter(f.facility for f in facts if f.facility)
+    names = list(counts.keys())
+    tokens = {n: _facility_tokens(n) for n in names}
+
+    parent: Dict[str, str] = {n: n for n in names}
+
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    token_owners: Dict[str, str] = {}
+    for n in names:
+        for t in tokens[n]:
+            if t in token_owners:
+                union(token_owners[t], n)
+            else:
+                token_owners[t] = n
+
+    # Acronym bridging: a short all-letters name ("MLNRC") merges with a
+    # multi-word name whose initials spell it ("Mountain Laurel Nursing
+    # and Rehabilitation Center").
+    def _initials(name: str) -> str:
+        words = [
+            w for w in re.sub(r"[^a-z0-9\s]", " ", name.lower()).split()
+            if w not in {"and", "of", "the", "at"}
+        ]
+        return "".join(w[0] for w in words) if len(words) >= 2 else ""
+
+    compact = {n: re.sub(r"[^a-z0-9]", "", n.lower()) for n in names}
+    initials_map: Dict[str, str] = {}
+    for n in names:
+        ini = _initials(n)
+        if len(ini) >= 3:
+            initials_map.setdefault(ini, n)
+    for n in names:
+        c = compact[n]
+        if 3 <= len(c) <= 6 and c in initials_map and initials_map[c] != n:
+            union(initials_map[c], n)
+
+    # Label each cluster with its most common raw name (lowercased) so the
+    # key is stable regardless of which variant a fact carries.
+    cluster_members: Dict[str, List[str]] = defaultdict(list)
+    for n in names:
+        cluster_members[find(n)].append(n)
+    label_of: Dict[str, str] = {}
+    for members in cluster_members.values():
+        label = max(members, key=lambda m: counts[m]).lower().strip()
+        for m in members:
+            label_of[m] = label
+    return label_of
 
 
 def _backfill_facilities(facts: List[VerifiedFact]) -> None:
@@ -214,36 +317,140 @@ def _drop_billing_when_clinical(facts: List[VerifiedFact]) -> Tuple[List[Verifie
     return kept, dropped
 
 
-def _consolidated_key_for_fact(fact: VerifiedFact) -> ConsolidatedVisitKey:
-    # Strip the date so whitespace/format variance ("10/10/2022" vs
-    # "10/10/2022 ") doesn't split one date of service into two entries.
-    return (
-        (fact.visit_date or "").strip(),
-        _visit_category(fact.visit_type),
-        _facility_root(fact.facility),
-    )
+# Ancillary documentation: folded into the day's primary entry, never a
+# standalone entry when an entry-worthy note exists for the same
+# date+setting. Detected by visit type wording or by provider credential.
+_ANCILLARY_VT_RE = re.compile(
+    r"\b(nursing note|nursing assessment|nursing flowsheet|nurses? notes?|"
+    r"mds|activities|recreation|social work|case management|"
+    r"care management|medication reconciliation|med rec|pharmacy|pharmacist|"
+    r"pharmacokinetic|telephone order|verbal order|orthotic|orthotics|brace|"
+    r"dietary|nutrition|dietitian|flowsheet)\b",
+    re.IGNORECASE,
+)
+_ANCILLARY_CRED_RE = re.compile(
+    r"(?<![a-z])(rn|lpn|lvn|cna|rph|pharmd|pharm tech|cpo|msw|lsw|lcsw|"
+    r"rd|ldn|cm|activities director)(?![a-z])",
+    re.IGNORECASE,
+)
+_PHYSICIAN_CRED_RE = re.compile(
+    r"(?<![a-z])(md|do|pa|pa-c|np|fnp|dpm|dc|od|psyd)(?![a-z])",
+    re.IGNORECASE,
+)
+
+_CONSULT_RE = re.compile(r"\bconsult", re.IGNORECASE)
+
+_MODALITY_PATTERNS = [
+    (re.compile(r"\bmri\b|magnetic resonance", re.I), "MRI"),
+    (re.compile(r"x[- ]?ray|radiograph|\bxr\b", re.I), "X-ray"),
+    (re.compile(r"\bct\b|computed tomograph|cat scan", re.I), "CT"),
+    (re.compile(r"ultrasound|sonogra|\bus\b", re.I), "US"),
+    (re.compile(r"\bemg\b|\bncv\b|nerve conduction", re.I), "EMG/NCV"),
+    (re.compile(r"myelogram|fluoroscop", re.I), "Fluoro"),
+]
 
 
-def _merge_unknown_facility_groups(
-    groups: Dict[ConsolidatedVisitKey, List[VerifiedFact]],
+def _imaging_modality(visit_type: Optional[str]) -> str:
+    vt = (visit_type or "").strip()
+    for pattern, label in _MODALITY_PATTERNS:
+        if pattern.search(vt):
+            return label
+    return "Other"
+
+
+def _is_ancillary_fact(fact: VerifiedFact) -> bool:
+    """True for nursing/MDS/activities/social-work/pharmacy/orthotics/
+    telephone-order documentation that folds into the day's primary entry.
+
+    A physician-credentialed note is never ancillary except telephone or
+    verbal orders, which are day-to-day care traffic rather than a visit.
+    """
+    vt = fact.visit_type or ""
+    cred_text = f"{fact.provider_credentials or ''} {fact.provider_name or ''}".replace(".", "")
+    if re.search(r"telephone order|verbal order", vt, re.IGNORECASE):
+        return True
+    # Admissions and discharges are always entry-worthy regardless of who
+    # authored them (e.g. "Skilled Nursing Facility Admission").
+    if re.search(r"admission|discharge", vt, re.IGNORECASE):
+        return False
+    if _PHYSICIAN_CRED_RE.search(cred_text):
+        return False
+    return bool(_ANCILLARY_VT_RE.search(vt) or _ANCILLARY_CRED_RE.search(cred_text))
+
+
+def _build_visit_groups(
+    facts: List[VerifiedFact],
 ) -> Dict[ConsolidatedVisitKey, List[VerifiedFact]]:
-    """Fold facts with no facility into a named group for the same
-    date+category when exactly one exists, so an unknown-facility fragment
-    doesn't produce a duplicate entry alongside the named one. With more
-    than one named candidate the unknown group stays separate rather than
-    guessing."""
+    """Group verified facts into one group per intended chronology entry,
+    implementing the per-date hierarchy documented on ConsolidatedVisitKey.
+    """
+    cluster_of = _cluster_facilities(facts)
+
+    groups: Dict[ConsolidatedVisitKey, List[VerifiedFact]] = defaultdict(list)
+    ancillary: List[Tuple[str, str, VerifiedFact]] = []
+
+    for f in facts:
+        date = (f.visit_date or "").strip()
+        category = _visit_category(f.visit_type)
+        cluster = cluster_of.get(f.facility or "", "")
+        if _is_ancillary_fact(f):
+            ancillary.append((date, cluster, f))
+            continue
+        if category == "Imaging":
+            # One entry per study (approximated by modality) per date; the
+            # radiology department's separate facility label must not
+            # duplicate the study, so the cluster is not part of the key.
+            key = (date, "Imaging", "", _imaging_modality(f.visit_type))
+        elif category in ("Visit", "Emergency") and _CONSULT_RE.search(f.visit_type or ""):
+            # Each consulting provider is their own entry on the date. The
+            # cluster is not part of the key: one consultant sees the
+            # patient once that day even when the note carries different
+            # facility-name variants.
+            key = (date, category, "", f"consult:{(f.provider_name or '').strip().lower()}")
+        else:
+            key = (date, category, cluster, "")
+        groups[key].append(f)
+
+    # Fold ancillary facts into the primary entry for their date+setting.
+    for date, cluster, f in ancillary:
+        target: Optional[ConsolidatedVisitKey] = None
+        for cand in (
+            (date, "Visit", cluster, ""),
+            (date, "Emergency", cluster, ""),
+            (date, "Procedure", cluster, ""),
+            (date, "Therapy", cluster, ""),
+        ):
+            if cand in groups:
+                target = cand
+                break
+        if target is None:
+            # Any entry-worthy non-imaging group at the same date+setting
+            candidates = [
+                k for k in groups
+                if k[0] == date and k[2] == cluster and k[1] != "Imaging"
+            ]
+            if candidates:
+                target = max(candidates, key=lambda k: len(groups[k]))
+        if target is None:
+            # Nothing entry-worthy that day at this setting (e.g. SNF
+            # daily care): one consolidated ancillary entry.
+            target = (date, "Visit", cluster, "ancillary")
+        groups[target].append(f)
+
+    # Fold unknown-facility groups into the single named group for the
+    # same date+category+subkey when unambiguous.
     merged: Dict[ConsolidatedVisitKey, List[VerifiedFact]] = {}
-    for key, facts in groups.items():
-        date, category, root = key
-        if root == "":
+    for key, group_facts in groups.items():
+        date, category, cluster, subkey = key
+        if cluster == "" and category != "Imaging":
             named = [
                 k for k in groups
-                if k[0] == date and k[1] == category and k[2] != ""
+                if k[0] == date and k[1] == category and k[3] == subkey and k[2] != ""
             ]
             if len(named) == 1:
-                merged.setdefault(named[0], []).extend(facts)
+                merged.setdefault(named[0], []).extend(group_facts)
                 continue
-        merged.setdefault(key, []).extend(facts)
+        merged.setdefault(key, []).extend(group_facts)
     return merged
 
 
@@ -293,17 +500,25 @@ def _pick_primary_provider(
     return best, by_name[best]["cred"]
 
 
-def _sort_key(key: ConsolidatedVisitKey) -> Tuple[int, str, str, str]:
+# Within one date: ED first, then the attending/primary visit, procedures,
+# imaging, therapy — mirroring how a reviewer reads a hospital day.
+_CATEGORY_ORDER = {"Emergency": 0, "Visit": 1, "Procedure": 2, "Imaging": 3, "Therapy": 4}
+
+
+def _sort_key(key: ConsolidatedVisitKey) -> Tuple[int, str, int, int, str, str]:
     """Sort dated visits ascending; undated visits sort last. Same-date
-    visits order deterministically by category then facility root."""
-    date_str, category, root = key
+    entries order by category (ED, visit, procedure, imaging, therapy),
+    primary entries before consults before ancillary-only, then cluster."""
+    date_str, category, cluster, subkey = key
+    cat_rank = _CATEGORY_ORDER.get(category, 9)
+    sub_rank = 0 if subkey == "" else (2 if subkey == "ancillary" else 1)
     if not date_str:
-        return (1, "", category, root)
+        return (1, "", cat_rank, sub_rank, cluster, subkey)
     try:
         dt = datetime.strptime(date_str, "%m/%d/%Y")
-        return (0, dt.isoformat(), category, root)
+        return (0, dt.isoformat(), cat_rank, sub_rank, cluster, subkey)
     except ValueError:
-        return (0, date_str, category, root)
+        return (0, date_str, cat_rank, sub_rank, cluster, subkey)
 
 
 def _sub_group_by_provider(
@@ -476,10 +691,7 @@ def run_assembly(
             billing_dropped,
         )
 
-    grouped: Dict[ConsolidatedVisitKey, List[VerifiedFact]] = defaultdict(list)
-    for fact in facts:
-        grouped[_consolidated_key_for_fact(fact)].append(fact)
-    groups = _merge_unknown_facility_groups(grouped)
+    groups = _build_visit_groups(facts)
 
     ordered_keys = sorted(groups.keys(), key=_sort_key)
 
@@ -518,10 +730,29 @@ def run_assembly(
                     len(visit_facts),
                 )
 
-            # Pick the single attributed provider (attending preferred) and the
-            # representative facility / visit-type label from the WHOLE group
-            # (not just the capped sample), so consolidation is stable.
-            primary_name, primary_cred = _pick_primary_provider(group_facts)
+            # Pick the single attributed provider and the representative
+            # facility / visit-type label from the WHOLE group (not just the
+            # capped sample), so consolidation is stable. Imaging entries are
+            # attributed to the interpreting radiologist (the provider whose
+            # facts carry the imaging findings); consult entries to the
+            # consulting provider the group was keyed on.
+            _, category, _, subkey = key
+            provider_pool = group_facts
+            if category == "Imaging":
+                readers = [
+                    f for f in group_facts if f.fact_category == "imaging_finding"
+                ]
+                if readers:
+                    provider_pool = readers
+            elif subkey.startswith("consult:"):
+                consult_name = subkey[len("consult:"):]
+                matching = [
+                    f for f in group_facts
+                    if (f.provider_name or "").strip().lower() == consult_name
+                ]
+                if matching:
+                    provider_pool = matching
+            primary_name, primary_cred = _pick_primary_provider(provider_pool)
             visit_key = {
                 "visit_date": key[0] or None,
                 "facility": _most_common([f.facility for f in group_facts]),

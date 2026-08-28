@@ -94,6 +94,12 @@ VISIT TYPE RULES:
 - IMAGING VISITS: NEVER use bare "Imaging" as the visit type label. Always name the modality AND body part from the verified facts (e.g., "MRI Cervical Spine without Contrast", "X-ray of Cervical Spine 5 Views", "CT Lumbar Spine"). When the verified facts include the radiologist's impression or findings, the entry body MUST state them (e.g., "Impression: ..."). An imaging entry that names no modality or body part is incomplete.
 - Abbreviations within visit type labels should preserve fully-capitalized abbreviations exactly as commonly written (BP not Bp, ED not Ed, MRI not Mri, CT not Ct, EKG not Ekg, IV not Iv). Apply title case only to non-abbreviation words. Examples: "BP Check Telehealth" (not "Bp Check Telehealth"), "CT Chest" (not "Ct Chest"), "IV Push Procedure" (not "Iv Push Procedure").
 
+ANCILLARY CONTENT RULES:
+- The verified facts may include ancillary documentation from the same date: nursing notes, MDS assessments, activities/recreation notes, social work or case management notes, pharmacy or medication reconciliation records, telephone orders, orthotics fittings. These are folded INTO this entry, never treated as the entry's subject.
+- Weave clinically material ancillary content into the narrative in at most one or two brief sentences (e.g. medication changes, a significant nursing observation). Omit routine ancillary content entirely (routine med passes, activity participation, administrative notes).
+- The entry stays attributed to the physician/primary provider in VISIT IDENTITY. Never attribute the entry to a nurse, pharmacist, social worker, or technician when a physician-authored note is present in the facts.
+- If ALL facts for this entry are ancillary (a skilled nursing facility day with no physician note), produce ONE consolidated entry summarizing that day's care in 2 to 4 sentences, attributed per VISIT IDENTITY.
+
 BILLING RULES:
 - Do NOT narrate billing or administrative content (CPT codes, charge amounts, payments, account balances) as clinical care.
 - If the verified facts for this visit consist ONLY of billing records with no clinical documentation, produce a single short sentence after the header stating that the service was billed and no clinical note is available in the records. Do not fabricate clinical detail from billing line items.
