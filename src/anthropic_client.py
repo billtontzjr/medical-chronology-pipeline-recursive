@@ -24,11 +24,10 @@ import time
 from typing import Optional
 
 try:
-    import httpx
     from anthropic import Anthropic, APIError, APIStatusError
 except ImportError as exc:  # pragma: no cover - import guard
     raise ImportError(
-        "anthropic and httpx are required. Run: pip install -r requirements.txt"
+        "anthropic is required. Run: pip install -r requirements.txt"
     ) from exc
 
 
@@ -65,21 +64,13 @@ class AnthropicClient:
             default_model or os.environ.get("ANTHROPIC_MODEL") or DEFAULT_MODEL
         )
 
-        http_client = httpx.Client(
-            timeout=httpx.Timeout(
-                connect=connect_timeout,
-                read=read_timeout,
-                write=60.0,
-                pool=10.0,
-            ),
-            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
-            follow_redirects=True,
-            verify=True,
-        )
-
+        # A plain float timeout is accepted by every SDK generation. Passing
+        # a custom httpx.Client broke when the 1.x SDK moved to httpx2
+        # ("Expected an instance of httpx2.Client"), so we let the SDK own
+        # its HTTP transport.
         self._client = Anthropic(
             api_key=api_key,
-            http_client=http_client,
+            timeout=read_timeout,
             max_retries=5,
         )
         self._logger = logging.getLogger(__name__)
