@@ -123,7 +123,7 @@ class StreamlitProgressReporter(ProgressReporter):
 # -------------------------------------------------------- status indicator
 
 
-def _render_running_status(pipeline: PrecisionChronologyPipeline) -> None:
+def _running_status_body(pipeline: PrecisionChronologyPipeline) -> None:
     """Top-of-page status indicator. Reads state.json from disk."""
     sessions = pipeline.list_sessions()
     for sess in sessions:
@@ -154,6 +154,18 @@ def _render_running_status(pipeline: PrecisionChronologyPipeline) -> None:
                 f"Phase {num} of 8 ({label}){progress_str}{elapsed}"
             )
             return
+
+
+# Self-refreshing banner: live run progress updates in place every few
+# seconds without rerunning (and dimming) the rest of the page.
+if hasattr(st, "fragment"):
+    _running_status_view = st.fragment(run_every="5s")(_running_status_body)
+else:
+    _running_status_view = _running_status_body
+
+
+def _render_running_status(pipeline: PrecisionChronologyPipeline) -> None:
+    _running_status_view(pipeline)
 
 
 def _render_verification_report(pipeline: PrecisionChronologyPipeline, session_id: str) -> None:
