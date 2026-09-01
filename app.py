@@ -248,8 +248,49 @@ def _render_outputs(pipeline: PrecisionChronologyPipeline, session_id: str) -> N
             )
 
 
+def _render_started_confirmation(pipeline: PrecisionChronologyPipeline) -> None:
+    """Durable, self-refreshing confirmation for a run just started from this
+    tab. Survives the post-click rerun (unlike a transient st.info) and shows
+    the run's live phase/status inline so the user sees it is working without
+    switching to the Sessions tab."""
+    sid = st.session_state.get("started_session_id")
+    if not sid:
+        return
+    try:
+        sess = pipeline.store.load(sid)
+    except Exception:
+        st.session_state.pop("started_session_id", None)
+        return
+
+    if sess.status == STATUS_COMPLETE:
+        st.success(f"✅ Run **{sid}** finished. See it in the Sessions tab.")
+        return
+    if sess.status == STATUS_FAILED:
+        st.error(
+            f"❌ Run **{sid}** failed: {sess.last_error or 'see Sessions tab'}"
+        )
+        return
+
+    # in progress
+    num, label = 1, PHASE_LABELS[0]
+    for i, phase_name in enumerate(PHASE_ORDER):
+        ph = sess.phases.get(phase_name)
+        if ph and ph.status == STATUS_IN_PROGRESS:
+            num, label = i + 1, PHASE_LABELS[i]
+            break
+    st.success(
+        f"▶️ Run **{sid}** started and is working — Phase {num} of 8 ({label}). "
+        "Watch live progress in the Sessions tab; you can leave this page."
+    )
+
+
 def _new_run_tab(pipeline: PrecisionChronologyPipeline) -> None:
     st.subheader("Start a new chronology run")
+    # A self-refreshing confirmation panel for a run started from this tab.
+    if hasattr(st, "fragment"):
+        st.fragment(run_every="4s")(_render_started_confirmation)(pipeline)
+    else:
+        _render_started_confirmation(pipeline)
     col1, col2 = st.columns(2)
     with col1:
         dropbox_link = st.text_input(
@@ -293,6 +334,7 @@ def _new_run_tab(pipeline: PrecisionChronologyPipeline) -> None:
                 st.error(str(exc))
             else:
                 st.session_state["active_session_id"] = state.session_id
+                st.session_state["started_session_id"] = state.session_id
                 st.session_state["last_link"] = dropbox_link
                 st.session_state["last_patient"] = patient_id
                 st.query_params["session_id"] = state.session_id
@@ -304,11 +346,8 @@ def _new_run_tab(pipeline: PrecisionChronologyPipeline) -> None:
                     model_assembly=model_asm,
                     strict_cross_check=strict,
                 )
-                st.info(
-                    f"Pipeline started for session **{state.session_id}**. "
-                    "Check the Sessions tab for progress."
-                )
-                time.sleep(2)
+                # Rerun once so the durable, self-refreshing confirmation
+                # panel at the top of this tab picks up the new session.
                 st.rerun()
 
 
