@@ -33,6 +33,21 @@ except ImportError as exc:  # pragma: no cover - import guard
 
 DEFAULT_MODEL = "claude-opus-5"
 
+# When a model declines a request (stop_reason "refusal" — a safety
+# classifier decision, more likely on frontier models with medical
+# content), the call is retried once on this model so a single chunk
+# never silently drops out of the chronology.
+DEFAULT_FALLBACK_MODEL = "claude-opus-5"
+SECONDARY_FALLBACK_MODEL = "claude-sonnet-4-6"
+
+
+class ResponseTruncated(RuntimeError):
+    """The model hit max_tokens before finishing; output is incomplete."""
+
+
+class ModelRefused(RuntimeError):
+    """The model (and its fallback) declined the request."""
+
 # Models that still accept sampling parameters (temperature). Opus 4.7+ and
 # the Claude 5 family reject temperature with a 400 error; reasoning mode
 # replaces it as the consistency mechanism on those models.
@@ -84,6 +99,7 @@ class AnthropicClient:
         max_retries: int = 5,
         base_delay: float = 2.0,
         system: Optional[str] = None,
+        allow_fallback: bool = True,
     ) -> str:
         """Call Claude with a single user prompt and return its text.
 
@@ -98,7 +114,12 @@ class AnthropicClient:
         Returns:
             The model's text response, stripped.
 
+            allow_fallback: Retry once on a fallback model if this model
+                refuses the request. Disabled on the fallback call itself.
+
         Raises:
+            ResponseTruncated: The model hit max_tokens; output incomplete.
+            ModelRefused: The model and its fallback both declined.
             RuntimeError: If all retries are exhausted.
             anthropic.APIError: For non-retryable API errors.
         """
@@ -119,6 +140,34 @@ class AnthropicClient:
                 if system is not None:
                     kwargs["system"] = system
                 response = self._client.messages.create(**kwargs)
+
+                stop_reason = getattr(response, "stop_reason", None)
+
+                # A refusal is a safety-classifier decision, not an error we
+                # can retry on the same model. Fall back once to a different
+                # model so the chunk is not silently lost.
+                if stop_reason == "refusal":
+                    fallback = self._fallback_for(chosen_model, allow_fallback)
+                    if fallback:
+                        self._logger.warning(
+                            "Model %s refused the request; retrying on %s",
+                            chosen_model,
+                            fallback,
+                        )
+                        return self.complete(
+                            prompt,
+                            model=fallback,
+                            max_tokens=max_tokens,
+                            max_retries=max_retries,
+                            base_delay=base_delay,
+                            system=system,
+                            allow_fallback=False,
+                        )
+                    raise ModelRefused(
+                        f"Model {chosen_model} declined the request and no "
+                        "fallback model was available"
+                    )
+
                 # Newer models may include thinking blocks in content;
                 # extract only the text blocks.
                 text_parts = [
@@ -126,7 +175,17 @@ class AnthropicClient:
                     for block in response.content
                     if getattr(block, "type", None) == "text"
                 ]
-                return "\n".join(text_parts).strip()
+                text = "\n".join(text_parts).strip()
+
+                # Truncated output must never be treated as a complete
+                # answer: for JSON extraction it means silently losing
+                # every fact after the cut.
+                if stop_reason == "max_tokens":
+                    raise ResponseTruncated(
+                        f"Model {chosen_model} hit max_tokens={max_tokens} before "
+                        "finishing; response is incomplete"
+                    )
+                return text
 
             except (APIError, APIStatusError) as exc:
                 msg = str(exc).lower()
@@ -160,3 +219,12 @@ class AnthropicClient:
                 time.sleep(delay)
 
         raise RuntimeError(f"Anthropic call failed after {max_retries} retries")
+
+    @staticmethod
+    def _fallback_for(model: str, allow_fallback: bool) -> Optional[str]:
+        """Pick a different model to retry a refused request on."""
+        if not allow_fallback:
+            return None
+        if model != DEFAULT_FALLBACK_MODEL:
+            return DEFAULT_FALLBACK_MODEL
+        return SECONDARY_FALLBACK_MODEL

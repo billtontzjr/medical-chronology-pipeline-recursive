@@ -68,12 +68,41 @@ def _first_match(patterns, text: str) -> Optional[str]:
     return None
 
 
+_US_STATES = {
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID",
+    "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS",
+    "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK",
+    "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV",
+    "WI", "WY", "DC",
+}
+
+# Field labels that OCR often runs straight into the name on the same line.
+_TRAILING_LABEL_RE = re.compile(
+    r"\s+(DOB|D\.?O\.?B\.?|Date of Birth|Sex|Gender|MRN|Acct|Account|Age|"
+    r"Date|Provider|Attending|Room)\b.*$",
+    re.IGNORECASE,
+)
+
+
 def _normalize_name(raw: Optional[str]) -> Optional[str]:
+    """Clean a regex-captured patient name.
+
+    The capture is greedy over letters and spaces, so OCR frequently drags
+    in what follows the name on the same line: a state code ("NANCY L
+    SMITH TX"), the next field label ("JANE DOE DOB"), or a wide gap
+    into an unrelated column. Cut at wide gaps and trailing labels, and
+    drop a trailing US state code when a full name still remains.
+    """
     if raw is None:
         return None
-    s = re.sub(r"\s+", " ", raw).strip()
-    # Strip newlines that crept into the regex match
-    s = s.split("\n", 1)[0].strip()
+    s = raw.split("\n", 1)[0]
+    s = re.split(r"\s{2,}|\t", s.strip())[0]
+    s = _TRAILING_LABEL_RE.sub("", s)
+    s = re.sub(r"\s+", " ", s).strip(" .,-")
+    tokens = s.split()
+    while len(tokens) > 2 and tokens[-1].upper() in _US_STATES:
+        tokens.pop()
+    s = " ".join(tokens).strip(" .,-")
     return s or None
 
 

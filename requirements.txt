@@ -1,6 +1,6 @@
 anthropic>=0.40.0,<1.0
 click>=8.1.0
-streamlit>=1.30.0
+streamlit>=1.37.0
 pydantic>=2.5.0
 python-docx>=1.1.0
 dropbox>=11.36.2

@@ -35,8 +35,17 @@ from src.session_state import (
 load_dotenv()
 
 # First entry is the default for new runs and the fallback for resumed
-# sessions. Opus 5 is the most accurate option for medical-legal work.
-MODEL_OPTIONS = ["claude-opus-5", "claude-sonnet-4-6", "claude-opus-4-7"]
+# sessions. Opus 5 is the recommended balance of accuracy and cost.
+# Fable 5.1 is Anthropic's most capable model at roughly twice the price;
+# it requires 30-day data retention on the Anthropic organization.
+MODEL_OPTIONS = ["claude-opus-5", "claude-fable-5-1", "claude-sonnet-4-6", "claude-opus-4-7"]
+MODEL_HELP = (
+    "claude-opus-5: recommended (highest accuracy at standard cost). "
+    "claude-fable-5-1: most capable model, about 2x the cost of Opus 5; "
+    "requires 30-day data retention enabled on your Anthropic organization. "
+    "claude-sonnet-4-6: faster and cheaper, lower accuracy. "
+    "claude-opus-4-7: previous generation."
+)
 
 PHASE_LABELS = [
     "Downloading PDFs from Dropbox",
@@ -312,8 +321,8 @@ def _new_run_tab(pipeline: PrecisionChronologyPipeline) -> None:
             value="",
             placeholder="/Precision chronology pipeline outputs/...",
         )
-        model_ext = st.selectbox("Extraction model", MODEL_OPTIONS, index=0)
-        model_asm = st.selectbox("Assembly model", MODEL_OPTIONS, index=0)
+        model_ext = st.selectbox("Extraction model", MODEL_OPTIONS, index=0, help=MODEL_HELP)
+        model_asm = st.selectbox("Assembly model", MODEL_OPTIONS, index=0, help=MODEL_HELP)
         strict = st.checkbox(
             "Strict cross-check (fail on any below-threshold phrase)", value=False
         )

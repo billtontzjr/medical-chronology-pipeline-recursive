@@ -14,12 +14,14 @@ the full fact JSONL into a Claude prompt.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from src.anthropic_client import AnthropicClient
+from src.cross_checker import cross_check
 from src.prompts.summary import build_gaps_prompt, build_summary_prompt
 from src.schemas import VerifiedFact
 from src.session_state import SessionStore
@@ -177,7 +179,11 @@ def generate_summary_and_gaps(
     gaps_text = anthropic_client.complete(
         gaps_prompt, model=model, max_tokens=4000
     ).strip()
-    gaps_path.write_text(gaps_text + "\n", encoding="utf-8")
+
+    # Deterministic review appendix: exactly what a human must verify by
+    # hand, computed from the pipeline's own records (no model involved).
+    appendix = _review_appendix(session_store, session_id, out_dir)
+    gaps_path.write_text(gaps_text + "\n" + appendix, encoding="utf-8")
 
     return {
         "summary_path": str(summary_path),
@@ -186,6 +192,73 @@ def generate_summary_and_gaps(
         "low_confidence_count": signals["low_confidence_count"],
         "long_gap_count": len(signals["long_gaps_over_threshold_days"]),
     }
+
+
+MAX_FLAGGED_PHRASES_LISTED = 40
+
+
+def _review_appendix(session_store: SessionStore, session_id: str, out_dir: Path) -> str:
+    """Build the manual-review appendix appended to gaps.md.
+
+    Two deterministic lists:
+    1. Source segments whose extraction output was unparseable even after
+       retry (their facts are absent from the chronology, so the reviewer
+       must read those pages directly).
+    2. Chronology phrases the cross-check could not tie to a verified
+       fact above the support threshold, lowest-support first. These are
+       the sentences most worth checking against the source before the
+       chronology goes out.
+    """
+    lines: List[str] = []
+
+    # 1. Unparseable chunks
+    bad_segments: List[str] = []
+    try:
+        facts_dir = session_store.extracted_facts_dir(session_id)
+        for p in sorted(facts_dir.glob("*.json")):
+            try:
+                d = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            note = d.get("extraction_notes") or ""
+            if note.startswith("validation_error") and not d.get("facts"):
+                bad_segments.append(f"{d.get('source_file')} (segment {d.get('chunk_id')})")
+    except Exception:  # noqa: BLE001
+        log.debug("review appendix: could not scan extracted facts", exc_info=True)
+    if bad_segments:
+        lines.append("")
+        lines.append(
+            "Source segments not captured in the chronology (extraction output "
+            "was unparseable after retry; review these pages manually):"
+        )
+        lines.extend(f"  {b}" for b in bad_segments)
+
+    # 2. Cross-check warnings
+    try:
+        chron = out_dir / "chronology.md"
+        vfp = session_store.verified_facts_path(session_id)
+        if chron.exists() and vfp.exists():
+            report = cross_check(chron.read_text(encoding="utf-8"), vfp)
+            if report.warnings:
+                ranked = sorted(report.warnings, key=lambda w: w.best_score)
+                lines.append("")
+                lines.append(
+                    f"Phrases flagged by cross-check for manual verification "
+                    f"({len(report.warnings)} of {report.phrases_checked} phrases fell "
+                    f"below the support threshold; lowest support first, up to "
+                    f"{MAX_FLAGGED_PHRASES_LISTED} listed; full list in "
+                    f"cross_check_report.md):"
+                )
+                for w in ranked[:MAX_FLAGGED_PHRASES_LISTED]:
+                    label = w.phrase_label or "unlabeled"
+                    lines.append(
+                        f"  {w.visit_date} {w.facility or ''} [{label}] "
+                        f"support {w.best_score:.2f}: {w.phrase_text[:160]}"
+                    )
+    except Exception:  # noqa: BLE001
+        log.debug("review appendix: cross-check listing failed", exc_info=True)
+
+    return ("\n".join(lines) + "\n") if lines else ""
 
 
 __all__ = ["generate_summary_and_gaps"]

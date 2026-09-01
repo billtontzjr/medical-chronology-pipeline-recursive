@@ -570,6 +570,18 @@ def _dedupe_facts(facts: List[VerifiedFact]) -> List[VerifiedFact]:
     return out
 
 
+# When a visit group must be capped, clinically decisive facts are kept
+# first and administrative/"other" facts are the first to go.
+_CATEGORY_PRIORITY = {
+    "assessment": 0, "diagnosis": 0,
+    "plan": 1, "physical_exam": 1, "imaging_finding": 1, "procedure_performed": 1,
+    "chief_complaint": 2, "history": 2,
+    "medication": 3, "lab_result": 3, "referral": 3, "work_status": 3,
+    "patient_quote": 4,
+    "other": 5,
+}
+
+
 def _cap_visit_facts(
     facts: List[VerifiedFact],
     *,
@@ -579,10 +591,13 @@ def _cap_visit_facts(
     """Cap a single visit group's facts so the assembly prompt cannot
     exceed the token budget.
 
-    Strategy: keep a diverse sample by walking facts in order and
-    skipping any whose (provider, category, finding_text) signature has
-    already been seen. Stop when either ``max_facts`` is reached or the
-    cumulative char-cost crosses ``max_chars``.
+    Strategy: walk facts in clinical-priority order (assessment and
+    diagnosis first, "other" last; original order within a priority),
+    keep a diverse sample by skipping any whose (provider, category,
+    finding_text) signature has already been seen, and stop when either
+    ``max_facts`` is reached or the cumulative char-cost crosses
+    ``max_chars``. Capping therefore sheds ancillary detail before it
+    ever sheds an assessment or plan.
     """
     if len(facts) <= max_facts:
         approx_total = sum(len(f.verbatim_quote or "") + APPROX_CHARS_PER_FACT for f in facts)
@@ -592,7 +607,8 @@ def _cap_visit_facts(
     seen_signature: set = set()
     kept: List[VerifiedFact] = []
     total_chars = 0
-    for f in facts:
+    prioritized = sorted(facts, key=lambda f: _CATEGORY_PRIORITY.get(f.fact_category, 5))
+    for f in prioritized:
         sig = (
             (f.provider_name or "").lower(),
             f.fact_category,
@@ -606,6 +622,52 @@ def _cap_visit_facts(
         if len(kept) >= max_facts or total_chars >= max_chars:
             break
     return kept, True
+
+
+_ENTRY_DATE_PREFIX_RE = re.compile(r"^\s*(\d{1,2}/\d{1,2}/\d{4})\.?\s*")
+_LIST_MARKER_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
+
+
+def _sanitize_entry(text: str, visit_date: Optional[str]) -> str:
+    """Deterministic hygiene on a narrated entry, applied after the model:
+
+    - strip markdown bold/italic markers and replace em/en dashes
+    - collapse bullets and line breaks into ONE paragraph
+    - force the entry to open with the group's own date of service in
+      MM/DD/YYYY (a model-written date that disagrees with the verified
+      group date is replaced and logged, never trusted)
+    """
+    t = (text or "").strip()
+    if not t:
+        return t
+    t = re.sub(r"\*\*|__", "", t)
+    t = t.replace("—", ",").replace("–", "-")
+    lines = [_LIST_MARKER_RE.sub("", ln).strip() for ln in t.splitlines()]
+    t = " ".join(ln for ln in lines if ln)
+    t = re.sub(r"\s{2,}", " ", t).strip()
+
+    if visit_date:
+        m = _ENTRY_DATE_PREFIX_RE.match(t)
+        if m:
+            written = m.group(1)
+            same = False
+            try:
+                same = (
+                    datetime.strptime(written, "%m/%d/%Y")
+                    == datetime.strptime(visit_date, "%m/%d/%Y")
+                )
+            except ValueError:
+                same = False
+            if not same:
+                logging.getLogger(__name__).warning(
+                    "Entry for %s was written with date %s; corrected to the "
+                    "verified group date",
+                    visit_date, written,
+                )
+            t = f"{visit_date}. " + t[m.end():]
+        else:
+            t = f"{visit_date}. " + t
+    return t
 
 
 _CREDENTIAL_TOKENS = [
@@ -771,6 +833,9 @@ def run_assembly(
             ).strip()
             # Strip stray "Provider:" prefix the model sometimes adds
             text = re.sub(r"^Provider:\s*", "", text)
+            # Deterministic hygiene: single paragraph, no markup, and the
+            # entry opens with the verified date of service.
+            text = _sanitize_entry(text, key[0] or None)
             return idx, key, text
         except Exception:  # noqa: BLE001
             log.exception(

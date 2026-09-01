@@ -25,7 +25,7 @@ from typing import Callable, Dict, List, Optional
 
 from pydantic import ValidationError
 
-from src.anthropic_client import AnthropicClient
+from src.anthropic_client import AnthropicClient, ModelRefused, ResponseTruncated
 from src.prompts.extraction import build_extraction_prompt
 from src.schemas import ChunkExtraction, ExtractedFact
 from src.session_state import PHASE_EXTRACTION, SessionStore
@@ -130,6 +130,25 @@ def _strip_md_fence(s: str) -> str:
     if s.startswith("```"):
         s = MD_FENCE_RE.sub("", s)
     return s.strip()
+
+
+def _isolate_json_object(s: str) -> str:
+    """Return the outermost {...} span of ``s`` if it is wrapped in prose.
+
+    Models occasionally prefix the JSON with a sentence or trail it with a
+    remark. Rather than discarding the whole chunk, isolate the object.
+    Returns the input unchanged when no braces are found.
+    """
+    start = s.find("{")
+    end = s.rfind("}")
+    if start != -1 and end > start:
+        return s[start : end + 1]
+    return s
+
+
+# Extraction JSON budget. Doubled once on truncation before giving up.
+EXTRACTION_MAX_TOKENS = 16000
+EXTRACTION_MAX_TOKENS_CEILING = 32000
 
 
 def _stamp_facts(
@@ -238,6 +257,7 @@ def run_extraction(
             "chunks_total": int,
             "chunks_extracted": int,   # this run only
             "chunks_skipped": int,     # already-on-disk (resume)
+            "chunks_invalid": int,     # unparseable twice; empty facts persisted
             "facts_emitted": int,
         }
     """
@@ -252,6 +272,7 @@ def run_extraction(
         chunks_extracted=0,
         chunks_skipped=0,
         chunks_failed_transient=0,
+        chunks_invalid=0,
         facts_emitted=0,
     )
 
@@ -298,6 +319,26 @@ def run_extraction(
         piece: Chunk = item["piece"]
         stem: str = item["stem"]
         out_path = facts_dir / f"{piece.chunk_id}.json"
+
+        def _call_and_parse(prompt: str, max_tokens: int) -> ChunkExtraction:
+            """One model call + parse. Doubles the token budget once if the
+            output was truncated (a truncated JSON array would otherwise
+            silently lose every fact after the cut)."""
+            try:
+                raw = anthropic_client.complete(prompt, model=model, max_tokens=max_tokens)
+            except ResponseTruncated:
+                if max_tokens >= EXTRACTION_MAX_TOKENS_CEILING:
+                    raise
+                log.warning(
+                    "Chunk %s truncated at max_tokens=%d; retrying with %d",
+                    piece.chunk_id, max_tokens, max_tokens * 2,
+                )
+                raw = anthropic_client.complete(
+                    prompt, model=model, max_tokens=max_tokens * 2
+                )
+            cleaned = _isolate_json_object(_strip_md_fence(raw))
+            return ChunkExtraction.model_validate_json(cleaned)
+
         try:
             prompt = build_extraction_prompt(
                 chunk_text=piece.text,
@@ -306,26 +347,43 @@ def run_extraction(
                 chunk_start_char=piece.start_char,
                 chunk_end_char=piece.end_char,
             )
-            # Generous budget: on reasoning models, thinking tokens count
-            # against max_tokens, so leave headroom above the JSON output.
-            raw = anthropic_client.complete(prompt, model=model, max_tokens=16000)
-            cleaned = _strip_md_fence(raw)
 
-            try:
-                parsed = ChunkExtraction.model_validate_json(cleaned)
-            except ValidationError as exc:
-                log.error("Validation failed for %s: %s", piece.chunk_id, exc)
-                # Persist an empty-facts record so we don't retry forever.
+            parsed: Optional[ChunkExtraction] = None
+            last_validation_error: Optional[ValidationError] = None
+            # Two attempts: malformed JSON from the model is usually a
+            # one-off, and a retry recovers the chunk instead of dropping
+            # every fact in it.
+            for parse_attempt in range(2):
+                try:
+                    parsed = _call_and_parse(prompt, EXTRACTION_MAX_TOKENS)
+                    break
+                except ValidationError as exc:
+                    last_validation_error = exc
+                    log.warning(
+                        "Validation failed for %s (attempt %d/2): %s",
+                        piece.chunk_id, parse_attempt + 1, str(exc)[:300],
+                    )
+
+            if parsed is None:
+                log.error(
+                    "Chunk %s produced unparseable output twice; persisting "
+                    "empty facts (flagged for manual review)",
+                    piece.chunk_id,
+                )
+                # Persist an empty-facts record so we don't retry forever,
+                # but count it so gaps.md can tell the reviewer which source
+                # pages were not captured.
+                errs = last_validation_error.errors()[:3] if last_validation_error else []
                 empty = ChunkExtraction(
                     source_file=stem,
                     chunk_id=piece.chunk_id,
                     chunk_start_char=piece.start_char,
                     chunk_end_char=piece.end_char,
                     facts=[],
-                    extraction_notes=f"validation_error: {exc.errors()[:3]}",
+                    extraction_notes=f"validation_error: {errs}",
                 )
                 _atomic_write_json(out_path, empty.model_dump(mode="json"))
-                return {"chunks_extracted": 1}
+                return {"chunks_extracted": 1, "chunks_invalid": 1}
 
             stamped = _stamp_facts(
                 parsed,
@@ -337,6 +395,21 @@ def run_extraction(
             )
             _atomic_write_json(out_path, stamped.model_dump(mode="json"))
             return {"chunks_extracted": 1, "facts_emitted": len(stamped.facts)}
+        except ModelRefused as exc:
+            # Both the chosen model and its fallback declined this chunk.
+            # Retrying on resume would just refuse again, so record it
+            # (surfaced in gaps.md) rather than deferring forever.
+            log.error("Chunk %s refused by model and fallback: %s", piece.chunk_id, exc)
+            refused = ChunkExtraction(
+                source_file=stem,
+                chunk_id=piece.chunk_id,
+                chunk_start_char=piece.start_char,
+                chunk_end_char=piece.end_char,
+                facts=[],
+                extraction_notes=f"validation_error: model_refused: {exc}",
+            )
+            _atomic_write_json(out_path, refused.model_dump(mode="json"))
+            return {"chunks_extracted": 1, "chunks_invalid": 1}
         except Exception as exc:  # noqa: BLE001
             log.exception(
                 "Transient failure on chunk %s; will retry on next resume",
@@ -388,6 +461,11 @@ def run_extraction(
         if summary["chunks_failed_transient"]:
             msg += (
                 f" — {summary['chunks_failed_transient']} chunk(s) deferred to next resume"
+            )
+        if summary["chunks_invalid"]:
+            msg += (
+                f" — {summary['chunks_invalid']} chunk(s) unparseable after retry "
+                "(listed in gaps.md for manual review)"
             )
         progress_callback(msg)
 
