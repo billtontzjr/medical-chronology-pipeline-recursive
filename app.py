@@ -265,27 +265,39 @@ def _new_run_tab(pipeline: PrecisionChronologyPipeline) -> None:
             "Strict cross-check (fail on any below-threshold phrase)", value=False
         )
 
-    if st.button("▶️  Start pipeline", type="primary", disabled=not dropbox_link):
-        state = pipeline.create_session(
-            dropbox_link=dropbox_link,
-            patient_id=patient_id or None,
-            destination_folder=destination or None,
-        )
-        st.session_state["active_session_id"] = state.session_id
-        st.session_state["last_link"] = dropbox_link
-        st.session_state["last_patient"] = patient_id
-        st.query_params["session_id"] = state.session_id
+    # Always clickable; validate on click. A disabled= gate tied to the
+    # text field is unreliable (uncommitted paste, dimmed reruns).
+    if st.button("▶️  Start pipeline", type="primary"):
+        if not (dropbox_link or "").strip():
+            st.error("Enter a Dropbox folder path or shared link first.")
+        else:
+            try:
+                state = pipeline.create_session(
+                    dropbox_link=dropbox_link,
+                    patient_id=patient_id or None,
+                    destination_folder=destination or None,
+                )
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.session_state["active_session_id"] = state.session_id
+                st.session_state["last_link"] = dropbox_link
+                st.session_state["last_patient"] = patient_id
+                st.query_params["session_id"] = state.session_id
 
-        # Run in background
-        pipeline.run_in_background(
-            state.session_id,
-            model_extraction=model_ext,
-            model_assembly=model_asm,
-            strict_cross_check=strict,
-        )
-        st.info(f"Pipeline started for session **{state.session_id}**. Check the Sessions tab for progress.")
-        time.sleep(2)
-        st.rerun()
+                # Run in background
+                pipeline.run_in_background(
+                    state.session_id,
+                    model_extraction=model_ext,
+                    model_assembly=model_asm,
+                    strict_cross_check=strict,
+                )
+                st.info(
+                    f"Pipeline started for session **{state.session_id}**. "
+                    "Check the Sessions tab for progress."
+                )
+                time.sleep(2)
+                st.rerun()
 
 
 def _render_session_progress(sess) -> None:
@@ -374,7 +386,7 @@ def _process_pending_deletes(pipeline: PrecisionChronologyPipeline) -> None:
             st.info("No completed sessions to delete.")
 
 
-def _sessions_tab(pipeline: PrecisionChronologyPipeline) -> None:
+def _sessions_tab_body(pipeline: PrecisionChronologyPipeline) -> None:
     st.subheader("Sessions")
     _process_pending_deletes(pipeline)
     _render_disk_gauge(pipeline)
@@ -382,14 +394,6 @@ def _sessions_tab(pipeline: PrecisionChronologyPipeline) -> None:
     if not sessions:
         st.info("No sessions yet. Start one in the New Run tab.")
         return
-
-    # Auto-refresh only when a pipeline thread is genuinely alive. A session
-    # left at in_progress by an app restart (dead thread) must not keep the
-    # tab in a refresh loop — that loop is what swallowed button clicks.
-    any_running = any(
-        s.status == STATUS_IN_PROGRESS and pipeline.is_running(s.session_id)
-        for s in sessions
-    )
 
     completed_count = sum(1 for s in sessions if s.status == STATUS_COMPLETE)
     if completed_count:
@@ -481,9 +485,22 @@ def _sessions_tab(pipeline: PrecisionChronologyPipeline) -> None:
                 _render_verification_report(pipeline, sess.session_id)
                 _render_outputs(pipeline, sess.session_id)
 
-    if any_running:
-        time.sleep(5)
-        st.rerun()
+
+# The sessions panel refreshes ITSELF every few seconds via st.fragment,
+# so live run progress updates without rerunning (and dimming) the whole
+# page. The previous approach — time.sleep(5) + st.rerun() at the end of
+# the tab — kept the entire script in a perpetual running state, which
+# dimmed every widget and swallowed button clicks (including a
+# permanently grayed-out Start pipeline button). Both tabs execute on
+# every Streamlit run, so the New Run tab was collateral damage.
+if hasattr(st, "fragment"):
+    _sessions_view = st.fragment(run_every="5s")(_sessions_tab_body)
+else:  # very old Streamlit: render statically, user refreshes manually
+    _sessions_view = _sessions_tab_body
+
+
+def _sessions_tab(pipeline: PrecisionChronologyPipeline) -> None:
+    _sessions_view(pipeline)
 
 
 def main() -> None:
