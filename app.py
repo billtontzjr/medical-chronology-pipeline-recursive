@@ -463,18 +463,33 @@ def _sessions_tab_body(pipeline: PrecisionChronologyPipeline) -> None:
                 "run. Deleting here permanently removes the session's PDFs, "
                 "OCR text, extracted facts, and outputs from this server's disk."
             )
-            confirm_all = st.checkbox(
+            st.checkbox(
                 "I understand this permanently deletes all completed sessions "
                 "from the server",
                 key="confirm_delete_all",
             )
-            if st.button(
-                "Delete ALL completed sessions", disabled=not confirm_all
-            ):
-                st.session_state["pending_delete_all_completed"] = True
-                st.rerun()
+            # Always clickable; validate on click (a disabled= gate bound to
+            # the checkbox lags behind the widget state and reads as broken).
+            if st.button("Delete ALL completed sessions"):
+                if not st.session_state.get("confirm_delete_all"):
+                    st.warning("Tick the confirmation box first.")
+                else:
+                    st.session_state["pending_delete_all_completed"] = True
+                    st.rerun()
 
-    for sess in sessions:
+    # Bandwidth/CPU guard: only the most recent sessions are rendered by
+    # default. Every rendered session costs a state read and page payload
+    # on each refresh, and 100+ sessions made the tab very heavy.
+    show_all = True
+    if len(sessions) > SESSIONS_SHOWN_BY_DEFAULT:
+        show_all = st.checkbox(
+            f"Show all {len(sessions)} sessions "
+            f"(default: the {SESSIONS_SHOWN_BY_DEFAULT} most recent)",
+            key="show_all_sessions",
+        )
+    visible_sessions = sessions if show_all else sessions[:SESSIONS_SHOWN_BY_DEFAULT]
+
+    for sess in visible_sessions:
         badge = {
             STATUS_COMPLETE: "✅",
             STATUS_FAILED: "❌",
@@ -542,8 +557,22 @@ def _sessions_tab_body(pipeline: PrecisionChronologyPipeline) -> None:
                 st.rerun()
 
             if sess.status == STATUS_COMPLETE:
-                _render_verification_report(pipeline, sess.session_id)
-                _render_outputs(pipeline, sess.session_id)
+                # Outputs are rendered ONLY on request. Streamlit sends
+                # expander contents to the browser even when collapsed, so
+                # rendering every session's ZIP, chronology, JSON, summary,
+                # gaps and cross-check text on every refresh was shipping
+                # megabytes per refresh to every open tab — the source of
+                # the Render bandwidth overage.
+                if st.checkbox(
+                    "Show verification report and output files",
+                    key=f"show_out_{sess.session_id}",
+                ):
+                    _render_verification_report(pipeline, sess.session_id)
+                    _render_outputs(pipeline, sess.session_id)
+
+
+# Sessions rendered by default; the rest behind a "show all" checkbox.
+SESSIONS_SHOWN_BY_DEFAULT = 20
 
 
 # The sessions panel refreshes ITSELF every few seconds via st.fragment,
@@ -554,13 +583,23 @@ def _sessions_tab_body(pipeline: PrecisionChronologyPipeline) -> None:
 # permanently grayed-out Start pipeline button). Both tabs execute on
 # every Streamlit run, so the New Run tab was collateral damage.
 if hasattr(st, "fragment"):
-    _sessions_view = st.fragment(run_every="5s")(_sessions_tab_body)
+    _sessions_view_live = st.fragment(run_every="5s")(_sessions_tab_body)
 else:  # very old Streamlit: render statically, user refreshes manually
-    _sessions_view = _sessions_tab_body
+    _sessions_view_live = _sessions_tab_body
 
 
 def _sessions_tab(pipeline: PrecisionChronologyPipeline) -> None:
-    _sessions_view(pipeline)
+    # Auto-refresh only while a pipeline thread is genuinely alive. When
+    # nothing is running, render once and stay still — no reason to re-send
+    # the session list to the browser every 5 seconds all day.
+    running = any(
+        s.status == STATUS_IN_PROGRESS and pipeline.is_running(s.session_id)
+        for s in pipeline.list_sessions()
+    )
+    if running:
+        _sessions_view_live(pipeline)
+    else:
+        _sessions_tab_body(pipeline)
 
 
 def main() -> None:
