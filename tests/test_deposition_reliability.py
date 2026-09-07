@@ -153,7 +153,7 @@ def test_old_deposition_rechecked_without_repeating_clinical_batch(tmp_path, mon
     a._read_extracted_files = lambda _: [
         {'filename': 'clinic.txt', 'content': '01/01/2026. Clinic. Follow-up. Back pain.'},
         prepare_document('example.txt', TEXT)]
-    a._process_scoped_batch = lambda *a: ('01/01/2026. Clinic. Follow-up. Back pain.', [])
+    a._process_scoped_batch = lambda *a, **k: ('01/01/2026. Clinic. Follow-up. Back pain.', [])
     replies = iter([IDENTITY, SUMMARY, GOOD])
     a._call_api_with_retry = lambda *a, **k: json.dumps(next(replies))
     a.generate_batches('', str(tmp_path))

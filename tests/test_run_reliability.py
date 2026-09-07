@@ -181,6 +181,10 @@ def test_failed_session_ui_shows_review_downloads_and_resume(tmp_path, monkeypat
         'files_needing_review': 1, 'technical_failures': 0, 'files': []}})
     (pipeline.store.batches_dir(state.session_id) / 'batch_002.deposition-work.json').write_text(
         json.dumps({'source_file': 'synthetic.txt', 'blocked_stage': 'summary'}))
+    (pipeline.store.batches_dir(state.session_id) / 'batch_004.scope-work.json').write_text(
+        json.dumps({'status': 'blocked', 'sources': [{'id': 'D001', 'filename': 'synthetic.txt'}],
+                    'attempts': [{'error': 'Source classification needs review',
+                                  'details': [{'id': 'D001', 'reason': 'Missing attachment'}]}]}))
     def init(self, **kwargs):
         self.store, self.logger = pipeline.store, pipeline.logger
         self.chronology_agent = pipeline.chronology_agent
@@ -197,5 +201,7 @@ def test_failed_session_ui_shows_review_downloads_and_resume(tmp_path, monkeypat
     labels = [element.proto.label for element in app.get('download_button')]
     assert 'Download page coverage report' in labels
     assert any('deposition review details' in label for label in labels)
+    assert any('source-screening review details' in label for label in labels)
+    assert any('Source-screening review' in e.label for e in app.expander)
     assert any('Run / Resume' in b.label and not b.disabled for b in app.button)
     st.cache_resource.clear()
