@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import os
 import re
-import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -20,7 +18,7 @@ from dotenv import load_dotenv
 # updates in place, instead of scrolling a new line for every page.
 LIVE_MSG_PATTERN = re.compile(r"Page\s+\d+\s*/\s*\d+")
 
-from src.word_export import chronology_docx
+from src.word_export import chronology_docx, output_zip
 from src.pipeline import DEFAULT_DESTINATION_PREFIX, MedicalChronologyPipeline
 from src.session_state import (
     PHASE_DOWNLOAD,
@@ -197,13 +195,14 @@ def _render_completed_session(
     if chronology_path.exists():
         separate_billing = st.checkbox(
             "Move entries labeled billing record only to a Word appendix",
-            value=True, key=f"billing_word_{key_prefix}_{state.session_id}",
+            value=False, key=f"billing_word_{key_prefix}_{state.session_id}",
             help="Uses explicit labels already in the draft. Does not decide whether clinical notes exist, remove duplicates, or verify facts. Markdown stays unchanged.",
         )
         st.download_button(
-            "Download chronology as Word (.docx)",
+            "⬇️ Download Word document (.docx)",
             data=chronology_docx(chronology_path.read_text(encoding="utf-8"), separate_billing=separate_billing),
             file_name="chronology.docx",
+            type="primary", use_container_width=True,
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             key=f"word_{key_prefix}_{state.session_id}",
         )
@@ -212,22 +211,18 @@ def _render_completed_session(
     # Build an in-memory ZIP so the user can download everything at once
     # (goes to the browser's Downloads folder — the web equivalent of the
     # desktop). Built fresh on each render so it always reflects disk state.
-    zip_buf = io.BytesIO()
-    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for p in files:
-            zf.writestr(p.name, p.read_text(encoding="utf-8"))
-    zip_buf.seek(0)
     st.download_button(
         label="⬇️ Download all as ZIP (to your computer)",
-        data=zip_buf.getvalue(),
+        data=output_zip(out_dir),
         file_name=f"{state.session_id}.zip",
         mime="application/zip",
         key=f"dlzip_{key_prefix}_{state.session_id}",
         use_container_width=True,
     )
 
-    tabs = st.tabs([p.name for p in files])
-    for tab, p in zip(tabs, files):
+    preview_files = [p for p in files if p.suffix != '.docx']
+    tabs = st.tabs([p.name for p in preview_files]) if preview_files else []
+    for tab, p in zip(tabs, preview_files):
         with tab:
             content = p.read_text(encoding="utf-8")
             if p.suffix == ".json":

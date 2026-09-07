@@ -15,7 +15,7 @@ EXCLUDED = {'correspondence', 'legal_filing', 'records_administration',
 
 # Match the purpose/title, not incidental mentions in a medical history.
 PURPOSES = (
-    ('records_administration', r'\b(?:administrative (?:records|life care)|records? release authorization|authorization (?:for|to) (?:disclos\w*|releas\w*)|release of (?:medical records|information)|HIPAA authorization|retainer (?:agreement|contract)|records? request|medical records? subpoena)\b'),
+    ('records_administration', r'\b(?:administrative (?:records|life care)|records? release authorization|authorization (?:for|to) (?:disclos\w*|releas\w*)|release of (?:medical records|information)|HIPAA authorization|life[- ]care planning retainer(?: billing)?|retainer (?:agreement|contract)|records? request|medical records? subpoena)\b'),
     ('cost_projection', r'\b(?:cost research report|cost[- ]only (?:report|projection)|financial projections? only|future care cost (?:estimate|projection)|life care (?:plan(?:ning)? )?cost (?:report|research|projection))\b'),
     ('correspondence', r'\b(?:administrative correspondence|legal correspondence|letter to counsel|transmittal (?:letter|email)|cover (?:letter|sheet)|life care plan transmission|email correspondence)\b'),
     ('legal_filing', r'\b(?:amended complaint|complaint for damages|civil complaint|answer (?:and affirmative defenses|to (?:the )?complaint)|affirmative defenses|motion (?:to|for|in limine)|notice of (?:taking (?:a )?deposition|deposition|hearing|filing|appearance)|certificate of service|request for (?:production|admissions)|interrogatories|summons|pleading|court order|petition for|subpoena duces tecum)\b'),

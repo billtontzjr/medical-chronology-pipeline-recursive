@@ -26,6 +26,7 @@ ADMIN = [
     '08/24/2026. Provider not documented. Visit Type: Life Care Planning Cost Research Report. Chief Complaint: Not documented. Plan: Projected MRI and surgery costs.',
     '08/25/2026. Clinic. Visit Type: Life Care Plan Transmission—Administrative Correspondence. History: Report sent to counsel.',
     '04/10/2026. Clinic. Administrative Life Care Planning Retainer. Plan: Pay fee.',
+    '04/10/2026. Planning Company. Life Care Planning Retainer Billing. History: Invoice paid; no clinical services.',
 ]
 
 
@@ -144,7 +145,7 @@ def test_saved_batch_gate_and_word_export(tmp_path):
     a = agent()
     result = a._combine_batches(str(tmp_path))
     assert result == MEDICAL + '\n\n' + DEPOSITION
-    assert len(a._assembly_exclusions) == 4
+    assert len(a._assembly_exclusions) == len(ADMIN)
     doc = Document(io.BytesIO(chronology_docx(result)))
     assert [p.text for p in doc.paragraphs] == [MEDICAL, DEPOSITION]
 
@@ -157,6 +158,8 @@ def test_all_nonmedical_sources_produce_log_and_no_fake_encounter(tmp_path):
     a._call_api_with_retry = lambda *args, **kw: pytest.fail('No model needed for clearly nonmedical-only input')
     assert a.generate_batches(str(sources), str(batches))['success']
     assert a.assemble_outputs(str(sources), str(batches), str(output))['success']
+    doc = Document(str(output / 'chronology.docx'))
+    assert 'MEDICAL RECORDS SUMMARY' in '\n'.join(p.text for p in doc.paragraphs)
     result = json.loads((output / 'chronology.json').read_text())
     assert result['source_files'] == []
     assert result['all_source_files'] == ['release.txt']

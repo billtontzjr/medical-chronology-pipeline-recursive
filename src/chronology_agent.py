@@ -14,6 +14,8 @@ from .deposition import (prepare_document, source_chunks, cover_dates, summarize
                          DepositionReviewRequired)
 from .chronology_scope import (screen_source, SCOPE_RULES, parse_scoped_response,
                                excluded_entry_category, ScopeReviewRequired)
+from .encounters import clean_labels, consolidate
+from .word_export import chronology_docx
 
 try:
     from anthropic import Anthropic, APIError, APIStatusError
@@ -282,7 +284,8 @@ class ChronologyAgent:
         seen = set()
         result = []
         for entry in entries:
-            key = " ".join(entry.split())
+            entry = clean_labels(entry)
+            key = " ".join(entry.split()).casefold()
             if key not in seen:
                 seen.add(key)
                 result.append(entry)
@@ -780,7 +783,8 @@ For all other visit types (general medical, follow-ups, etc.):
 - If multiple pages or sections of a document refer to the same visit, merge them into a SINGLE entry
 - Do NOT create separate entries for different sections (e.g., history, exam, plan) of the SAME visit
 - If two documents describe the same visit on the same date at the same facility, produce ONE combined entry
-- HOWEVER: If the SAME DATE has multiple DISTINCT visits (different providers, different facilities, or clearly separate encounters such as an office visit AND an imaging study), create a SEPARATE entry for EACH distinct visit. Do not skip or merge genuinely different visits just because they share a date.
+- Combine ALL care by the SAME provider on the SAME date into ONE entry, including the evaluation plus blocks, procedures and related instructions. Include every distinct procedure, body region and level; combining entries must not discard clinical detail.
+- Different providers on the same date remain distinct unless the source clearly identifies them as part of the same encounter. Never merge unrelated care merely because dates match.
 
 **4. BILLING RECORDS (CRITICAL):**
 - When a file contains BOTH billing/administrative records AND clinical records (chief complaint, HPI, exam, assessment) for the same date of service, ALWAYS build the entry from the CLINICAL record — NEVER from the billing record
@@ -796,7 +800,7 @@ For all other visit types (general medical, follow-ups, etc.):
 
 **6. THERAPY VISITS (CRITICAL):**
 - ALWAYS specify the TYPE of therapy in both the header and the summary when the record identifies it: physical therapy, occupational therapy, speech therapy, chiropractic therapy, psychological/psychotherapy, trauma therapy, etc.
-- Example header: "Visit Type: Physical Therapy Initial Evaluation" — never just "Therapy"
+- Example header: "Physical Therapy Initial Evaluation" — never just "Therapy"
 - If the record does not specify the therapy type, write "Therapy (type not specified in record)"
 
 **7. IMAGING STUDIES (CRITICAL):**
@@ -806,6 +810,7 @@ For all other visit types (general medical, follow-ups, etc.):
 - If an office visit note documents that imaging was ordered or reviewed, mention the modality and body part in that visit's entry as well
 
 **8. FORMATTING RULES (MAINTAIN CURRENT FORMAT):**
+- Write the service name itself (e.g., Office Visit and Lumbar Medial Branch Blocks), NEVER the literal label "Visit Type:".
 - Each date of service entry MUST be ONE CONTINUOUS PARAGRAPH with NO line breaks within the entry
 - All labels (Provider:, Chief Complaint:, Assessment:, Plan:, etc.) flow together in the same paragraph
 - The ONLY separator between different date entries is a SINGLE blank line
@@ -816,7 +821,7 @@ For all other visit types (general medical, follow-ups, etc.):
 - Tone: Direct, factual, clinical language with in-paragraph headings
 - No bulleted lists: Convert all bullets to flowing sentences
 - Imaging reports: Include only Impression section
-- Therapy notes: Consolidate multiple routine follow-up sessions into one entry listing all dates, always stating the therapy type"""
+- Therapy notes: Use one entry per actual date of service; do not group multiple dates into a single paragraph. Merge all notes for the same provider and date, always stating the therapy type."""
 
         prompt = f"""Generate chronology entries from these {len(documents)} medical documents.
 
@@ -912,7 +917,7 @@ review_required rather than silently dropping medical evidence."""
         # A changed batching algorithm must not reuse old outputs by ordinal.
         # Preserve all old files and require a fresh run on any mismatch.
         signature = hashlib.sha256(json.dumps({
-            'version': 'medical-scope-v2', 'source_exclusions': source_exclusions, 'model': getattr(self, 'model', None),
+            'version': 'same-day-care-v3', 'source_exclusions': source_exclusions, 'model': getattr(self, 'model', None),
             'batches': batches,
         }, sort_keys=True).encode()).hexdigest()
         manifest = batches_path / 'batch_manifest.json'
@@ -1007,6 +1012,7 @@ review_required rather than silently dropping medical evidence."""
         batches_path = Path(batches_dir)
         files = sorted(batches_path.glob("batch_*.md"))
         self._assembly_exclusions = []
+        self._encounter_merges = []
         if not files:
             return ""
         combined = "\n\n".join(f.read_text(encoding="utf-8").strip() for f in files)
@@ -1021,7 +1027,9 @@ review_required rather than silently dropping medical evidence."""
                     'stage': 'assembly_screen'})
             elif entry.strip():
                 kept.append(entry)
-        return '\n\n'.join(kept)
+        merged, self._encounter_merges = consolidate(kept, self._call_api_with_retry,
+            batches_path / 'encounter_consolidation.json', getattr(self, 'model', None))
+        return '\n\n'.join(merged)
 
     def extract_header(
         self,
@@ -1218,6 +1226,7 @@ review_required rather than silently dropping medical evidence."""
             "source_files": source_files,
             "all_source_files": all_source_files,
             "excluded_materials": exclusions,
+            "encounter_consolidation": getattr(self, '_encounter_merges', []),
             "deposition_evidence": [json.loads(p.read_text(encoding='utf-8'))
                 for p in sorted(Path(batches_dir).glob('batch_*.deposition.json'))],
         }
@@ -1228,7 +1237,10 @@ review_required rather than silently dropping medical evidence."""
 
         def _atomic_write(path: Path, text: str) -> None:
             tmp = path.with_suffix(path.suffix + ".tmp")
-            tmp.write_text(text, encoding="utf-8")
+            if isinstance(text, bytes):
+                tmp.write_bytes(text)
+            else:
+                tmp.write_text(text, encoding="utf-8")
             os.replace(tmp, path)
 
         exclusions_file = output_path / 'excluded_documents.json'
@@ -1238,6 +1250,10 @@ review_required rather than silently dropping medical evidence."""
         chronology_file = output_path / "chronology.md"
         _atomic_write(chronology_file, chronology_md)
         files_written["chronology.md"] = str(chronology_file)
+
+        word_file = output_path / "chronology.docx"
+        _atomic_write(word_file, chronology_docx(chronology_md))
+        files_written['chronology.docx'] = str(word_file)
 
         json_file = output_path / "chronology.json"
         _atomic_write(json_file, json.dumps(chronology_json, indent=2))
