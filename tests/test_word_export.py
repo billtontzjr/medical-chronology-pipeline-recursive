@@ -17,3 +17,9 @@ def test_export_preserves_entries_and_separates_only_explicit_billing():
     assert result.index('Billed service.') > result.index('Billing-only appendix')
     original = Document(io.BytesIO(chronology_docx(text)))
     assert 'Billing-only appendix' not in '\n'.join(p.text for p in original.paragraphs)
+
+
+def test_deposition_paragraph_remains_in_dated_chronology():
+    entry = '07/16/2026. Jamie Example, Deposition. The patient recalled temporary relief and denied further trauma.'
+    doc = Document(io.BytesIO(chronology_docx(entry, separate_billing=True)))
+    assert entry in [p.text for p in doc.paragraphs]
