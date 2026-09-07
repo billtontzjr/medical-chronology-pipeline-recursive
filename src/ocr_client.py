@@ -252,7 +252,7 @@ class OCRClient:
                     result = self._extract_text_from_image(image_base64, timeout=60)
 
                     if result['success'] and result['text'].strip():
-                        all_text.append(result['text'])
+                        all_text.append(f"=== SOURCE PDF PAGE {page_num} ===\n{result['text']}")
                         successful_pages += 1
 
                     # Clear memory immediately after processing this page

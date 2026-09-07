@@ -45,7 +45,7 @@ def prepare_document(filename, content):
     headings = re.finditer(r"(?im)^\s*(?:\d+\s+)?Transcript\s+T\s*ext\s*$", content)
     for heading in headings:
         following = content[heading.end():]
-        if re.match(r"\s*(?:=== PDF PAGE \d+ ===\s*)?(?:\d+\s+)?(?:IN THE [^\n]{0,100}COURT|DEPOSITION OF|DEPONENT\s*:)", following, re.I) and transcript_structure(following):
+        if re.match(r"\s*(?:=== (?:SOURCE )?PDF PAGE \d+ ===\s*)?(?:\d+\s+)?(?:IN THE [^\n]{0,100}COURT|DEPOSITION OF|DEPONENT\s*:)", following, re.I) and transcript_structure(following):
             start = heading.end()
             break
     prefatory_summary = bool(re.search(
