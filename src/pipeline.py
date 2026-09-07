@@ -16,6 +16,7 @@ The pipeline itself does not depend on Streamlit. The UI calls
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from datetime import datetime
@@ -24,6 +25,8 @@ from typing import Callable, Dict, List, Optional
 
 from .chronology_agent import ChronologyAgent
 from .ocr_client import OCRClient
+from .ocr_coverage import collect_coverage, coverage_path, save_coverage
+from .deposition_evidence import atomic_json
 from .session_state import (
     PauseRequested,
     SessionState,
@@ -215,11 +218,20 @@ class MedicalChronologyPipeline:
             else:
                 cb("⏭️  Phase 2/5: OCR already complete — skipping")
 
+            # Legacy completed OCR phases also need an honest coverage report.
+            coverage = collect_coverage(self.store.input_dir(session_id), self.store.extracted_dir(session_id))
+            self.store.update_phase_data(state, PHASE_OCR, {'coverage': coverage})
+            if coverage['files_needing_review']:
+                cb(f"⚠️ OCR coverage: {coverage['files_needing_review']} file(s) need page review; see the coverage report")
+            if coverage['technical_failures']:
+                self.store.mark_phase(state, PHASE_OCR, STATUS_FAILED)
+                raise RuntimeError("OCR has failed or missing pages. Resume to retry extraction before generating a chronology.")
+
             # Phase 3 — generate batches (resumable at batch granularity)
             self._check_pause(session_id)
             if state.phases[PHASE_GENERATE].status != STATUS_COMPLETE:
                 self.store.mark_phase(state, PHASE_GENERATE, STATUS_IN_PROGRESS)
-                cb("🤖 Phase 3/5: Generating chronology with Claude…")
+                cb(f"🤖 Phase 3/5: Generating chronology with {self.chronology_agent.model}…")
                 await self._phase_generate(state, cb, session_id)
                 self.store.mark_phase(state, PHASE_GENERATE, STATUS_COMPLETE)
             else:
@@ -279,6 +291,10 @@ class MedicalChronologyPipeline:
             state = self.store.load(session_id)
             state.status = STATUS_FAILED
             state.last_error = str(e)
+            for phase in state.phases.values():
+                if phase.status == STATUS_IN_PROGRESS:
+                    phase.status = STATUS_FAILED
+                    phase.error = str(e)
             self.store.save(state)
             return {
                 "status": "failed",
@@ -331,7 +347,9 @@ class MedicalChronologyPipeline:
         pending: List[Path] = []
         for p in pdf_paths:
             txt = extracted_dir / p.relative_to(input_dir).with_suffix(".txt")
-            if txt.exists() and txt.stat().st_size > 0:
+            sidecar = coverage_path(p, input_dir, extracted_dir)
+            saved = json.loads(sidecar.read_text()) if sidecar.exists() else {}
+            if txt.exists() and txt.stat().st_size > 0 and not saved.get('technical_failure'):
                 continue
             pending.append(p)
 
@@ -341,20 +359,33 @@ class MedicalChronologyPipeline:
 
         cb(f"   ↳ OCR'ing {len(pending)} of {len(pdf_paths)} PDFs")
 
-        # Drive OCR one file at a time; batch_extract respects that.
-        results = await self.ocr_client.batch_extract(
-            [str(p) for p in pending], max_concurrent=1, progress_callback=cb
-        )
-        for r in results:
+        # Save each file immediately, so a restart during a later PDF retains it.
+        for number, pdf in enumerate(pending, 1):
+            cb(f"   ↳ extracting file {number}/{len(pending)}")
+            # Incomplete marker prevents a crash from masquerading as legacy OCR.
+            save_coverage({}, pdf, input_dir, extracted_dir)
+            results = await self.ocr_client.batch_extract(
+                [str(pdf)], max_concurrent=1, progress_callback=cb
+            )
+            if len(results) != 1:
+                raise RuntimeError("OCR returned an incomplete file result list; resume to retry")
+            r = results[0]
             if r["success"]:
                 self.ocr_client.save_extracted_text(
                     r, str(extracted_dir), base_input_dir=str(input_dir)
                 )
             else:
-                self.logger.error(
-                    f"OCR failed for {r.get('file_name')}: {r.get('error')}"
-                )
+                # A retry must never reuse stale text from a previous extraction.
+                stale = extracted_dir / pdf.relative_to(input_dir).with_suffix('.txt')
+                if stale.exists():
+                    stale.unlink()
+                self.logger.error("OCR returned no usable text; page coverage records the affected file")
+            save_coverage(r, pdf, input_dir, extracted_dir)
 
+        coverage = collect_coverage(input_dir, extracted_dir)
+        self.store.update_phase_data(state, PHASE_OCR, {'coverage': coverage})
+        if coverage['technical_failures']:
+            raise RuntimeError("OCR has failed or missing pages. Completed files are saved; resume to retry failed files.")
         # Verify at least something came out
         if not list(extracted_dir.rglob("*.txt")):
             raise RuntimeError("No text could be extracted from PDFs")
@@ -404,6 +435,8 @@ class MedicalChronologyPipeline:
         )
         if not result["success"]:
             raise RuntimeError(result.get("error", "Assembly failed"))
+        atomic_json(Path(output_dir) / 'ocr_coverage.json',
+                    collect_coverage(self.store.input_dir(state.session_id), extracted_dir))
         self.store.update_phase_data(
             state,
             PHASE_HEADER,

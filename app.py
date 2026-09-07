@@ -171,6 +171,24 @@ def run_session_with_progress(
     st.rerun()
 
 
+def _render_source_review(pipeline, state, key_prefix):
+    coverage = state.phases[PHASE_OCR].data.get('coverage', {})
+    if coverage.get('files_needing_review'):
+        st.warning(f"{coverage['files_needing_review']} source file(s) have unread pages or unknown OCR coverage. "
+                   "Review the original pages before relying on the chronology.")
+        st.download_button("Download page coverage report", json.dumps(coverage, indent=2),
+                           file_name="ocr_coverage.json", mime="application/json",
+                           key=f"{key_prefix}_coverage_{state.session_id}")
+    diagnostics = sorted(pipeline.store.batches_dir(state.session_id).glob('batch_*.deposition-work.json'))
+    if diagnostics and state.status == STATUS_FAILED:
+        st.caption("Deposition review details include source passages and rejected responses. "
+                   "They stay in this session unless you download them.")
+        for path in diagnostics:
+            st.download_button(f"Download deposition review details ({path.stem.split('.')[0]})",
+                               path.read_bytes(), file_name=path.name, mime="application/json",
+                               key=f"{key_prefix}_diagnostic_{state.session_id}_{path.name}")
+
+
 def _render_completed_session(
     pipeline: MedicalChronologyPipeline,
     state: SessionState,
@@ -474,6 +492,7 @@ with tab_new:
 
             if state.last_error:
                 st.error(f"Last error: {state.last_error}")
+            _render_source_review(pipeline, state, "newrun")
 
             col_run, col_pause = st.columns(2)
             with col_run:
@@ -528,6 +547,7 @@ with tab_sessions:
 
                 if s.last_error:
                     st.error(s.last_error)
+                _render_source_review(pipeline, s, "sessions")
 
                 col_open, col_resume, col_pause, col_del = st.columns(4)
                 with col_open:

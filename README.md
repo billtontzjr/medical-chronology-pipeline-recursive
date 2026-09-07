@@ -12,6 +12,12 @@ This pipeline automates the process of:
 
 The generated chronologies follow strict medical-legal formatting standards suitable for spinal surgeons, life care planners, attorneys, and insurance companies.
 
+### Reliability and source review
+
+See [deposition evidence and resumable review](docs/deposition-summaries.md),
+[page extraction coverage](docs/extraction-coverage.md), and
+[chronology and Word output](docs/chronology-output.md) for current behavior.
+
 ### Current Status
 
 - ✅ **Fully functional** for personal Dropbox folders

@@ -33,6 +33,11 @@ def statements():
                             'evidence': ['2 A. I recall back pain.']}]}
 
 
+def support():
+    return {'reviews': [{'statement_id': 1, 'verdict': 'supported',
+                         'reason': 'The answer supports the attributed recollection.'}]}
+
+
 def test_combined_summary_and_toc_excluded():
     prefix = 'Deposition Summary\nTranscript Text\nOverall Summary\nInvented surgery.\n'
     content = prefix + 'Transcript Text\n' + transcript()
@@ -72,7 +77,7 @@ def test_dates_and_lossless_chunks():
 
 
 def test_one_dated_paragraph_and_retained_evidence():
-    calls, responses = [], iter([metadata(), statements()])
+    calls, responses = [], iter([metadata(), statements(), support()])
     def call(prompt, **kw):
         calls.append(prompt)
         return json.dumps(next(responses))
@@ -82,7 +87,7 @@ def test_one_dated_paragraph_and_retained_evidence():
     assert '\n' not in entry
     assert evidence['statements'] == statements()['statements']
     assert evidence['transcript_sha256'] == doc['transcript_sha256']
-    assert 'never separate dated visits' in calls[-1]
+    assert 'never separate dated visits' in calls[-2]
 
 
 @pytest.mark.parametrize('field,value', [('date', '07/15/2026'), ('witness', 'Wrong Person'),
@@ -96,7 +101,7 @@ def test_unsubstantiated_identity_is_not_saved(field, value):
 def test_unsupported_quote_rejected():
     result = statements()
     result['statements'][0]['evidence'] = ['I had surgery.']
-    responses = iter([metadata(), result])
+    responses = iter([metadata(), result, result])
     with pytest.raises(DepositionReviewRequired):
         summarize(prepare_document('source.txt', transcript()), lambda *a, **k: json.dumps(next(responses)))
 
@@ -111,11 +116,13 @@ def test_long_transcript_all_parts_read_then_one_summary():
         if 'Extract relevant testimony from this slice' in prompt:
             return json.dumps({'statements': [{'text': 'The witness reported continued pain.',
                 'evidence': ['A. Pain continued.']}]})
-        return json.dumps(statements())
+        if 'Audit each summary sentence' in prompt:
+            return json.dumps(support())
+        return json.dumps({'statements': [{'text': 'The witness reported continued pain.', 'evidence': ['A. Pain continued.']}]})
     entry, evidence = summarize(doc, call)
     assert entry.count('07/16/2026.') == 1
-    assert len(calls) == len(source_chunks(doc)) + 2
-    assert 'FINAL TESTIMONY' in calls[-2]
+    assert len(calls) == len(source_chunks(doc)) + 3
+    assert 'FINAL TESTIMONY' in calls[-3]
     assert evidence['transcript_chars_read'] == len(doc['content'])
 
 
@@ -137,7 +144,7 @@ def test_generation_resume_and_source_change(tmp_path):
     a = agent()
     doc = prepare_document('witness.txt', transcript())
     a._read_extracted_files = lambda _: [doc]
-    responses = iter([metadata(), statements()])
+    responses = iter([metadata(), statements(), support()])
     a._call_api_with_retry = lambda *a, **k: json.dumps(next(responses))
     assert a.generate_batches('', str(tmp_path))['success']
     assert (tmp_path / 'batch_001.deposition.json').exists()
@@ -153,7 +160,7 @@ def test_assembly_keeps_paragraph_and_evidence(tmp_path):
     sources, batches, output = [tmp_path / name for name in ('sources', 'batches', 'output')]
     sources.mkdir()
     (sources / 'witness.txt').write_text(transcript())
-    responses = iter([metadata(), statements()])
+    responses = iter([metadata(), statements(), support()])
     a._call_api_with_retry = lambda *a, **k: json.dumps(next(responses))
     a.generate_batches(str(sources), str(batches))
     a.extract_header = lambda *a: {'patient_name': 'JAMIE EXAMPLE', 'date_of_birth': '[See Records]', 'date_of_injury': '[See Records]'}

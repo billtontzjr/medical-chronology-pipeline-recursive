@@ -3,6 +3,8 @@
 import base64
 import io
 import gc
+import os
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Callable, Optional
 import httpx
@@ -213,9 +215,10 @@ class OCRClient:
                     del all_images
                     del test_images
                     gc.collect()
-                except:
-                    # Last resort: assume 10 pages and try
-                    total_pages = 100  # Try up to 100 pages
+                except Exception as exc:
+                    raise RuntimeError("Could not establish the PDF page count; extraction needs review") from exc
+            if not isinstance(total_pages, int) or total_pages < 1:
+                raise RuntimeError("PDF page count is missing or invalid")
 
             if progress_callback:
                 progress_callback(f"📄 Processing {file_name} ({total_pages} pages)")
@@ -223,6 +226,7 @@ class OCRClient:
             # Process each page individually (memory-efficient)
             all_text = []
             successful_pages = 0
+            page_results = []
 
             for page_num in range(1, total_pages + 1):
                 if progress_callback:
@@ -240,8 +244,7 @@ class OCRClient:
                     )
 
                     if not images:
-                        # No more pages, stop processing
-                        break
+                        raise RuntimeError("No image returned for an expected PDF page")
 
                     image = images[0]
 
@@ -254,6 +257,12 @@ class OCRClient:
                     if result['success'] and result['text'].strip():
                         all_text.append(f"=== SOURCE PDF PAGE {page_num} ===\n{result['text']}")
                         successful_pages += 1
+                        page_results.append({'page': page_num, 'status': 'text'})
+                    elif result['success']:
+                        page_results.append({'page': page_num, 'status': 'no_text'})
+                    else:
+                        page_results.append({'page': page_num, 'status': 'error',
+                                             'error': 'OCR service did not return a successful result'})
 
                     # Clear memory immediately after processing this page
                     del images
@@ -262,15 +271,10 @@ class OCRClient:
                     gc.collect()
 
                 except Exception as e:
-                    error_msg = str(e).lower()
-                    # Stop if we've gone past the last page
-                    if 'page' in error_msg and ('out of range' in error_msg or 'invalid' in error_msg or 'exceed' in error_msg):
-                        if progress_callback:
-                            progress_callback(f"✅ Reached end of document at page {page_num-1}")
-                        break
-                    # For other errors, log and continue
+                    page_results.append({'page': page_num, 'status': 'error',
+                                         'error': 'Page conversion or extraction failed'})
                     if progress_callback:
-                        progress_callback(f"⚠️ Page {page_num} failed: {str(e)[:100]}")
+                        progress_callback(f"⚠️ Page {page_num} could not be extracted; recorded for review")
                     continue
 
             # Combine all pages
@@ -285,11 +289,16 @@ class OCRClient:
                     'file_name': file_name,
                     'error': f"No text extracted from {total_pages} pages",
                     'text': '',
-                    'confidence': 0.0
+                    'confidence': 0.0,
+                    'source_path': str(Path(file_path)),
+                    'page_count': total_pages,
+                    'page_results': page_results
                 }
 
             if progress_callback:
-                progress_callback(f"✅ {file_name}: Extracted {successful_pages}/{total_pages} pages")
+                icon = "✅" if successful_pages == total_pages else "⚠️"
+                progress_callback(f"{icon} {file_name}: Text extracted from {successful_pages}/{total_pages} pages"
+                                  + (" — remaining pages need review" if successful_pages < total_pages else ""))
 
             return {
                 'success': True,
@@ -297,7 +306,8 @@ class OCRClient:
                 'source_path': str(Path(file_path)),
                 'text': full_text,
                 'confidence': confidence,
-                'page_count': total_pages
+                'page_count': total_pages,
+                'page_results': page_results
             }
 
         except Exception as e:
@@ -375,8 +385,14 @@ class OCRClient:
         # Ensure output directory exists
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Save text
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(result['text'])
+        # Atomically publish text only after the complete file has been written.
+        fd, name = tempfile.mkstemp(prefix=output_path.name+'.', suffix='.tmp', dir=output_path.parent)
+        temp = Path(name)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                handle.write(result['text'])
+            temp.replace(output_path)
+        finally:
+            temp.unlink(missing_ok=True)
 
         return str(output_path)
