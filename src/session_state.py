@@ -152,7 +152,14 @@ class SessionStore:
 
     def __init__(self, base_dir: str):
         self.base_dir = Path(base_dir)
-        self.sessions_root = self.base_dir / "data" / "sessions"
+        configured = os.getenv("SESSION_DATA_DIR", "").strip()
+        data_dir = Path(configured) if configured else self.base_dir / "data"
+        if configured and not data_dir.is_absolute():
+            raise ValueError("SESSION_DATA_DIR must be an absolute path.")
+        require_disk = os.getenv("REQUIRE_PERSISTENT_STORAGE", "").lower() in ("1", "true", "yes")
+        if require_disk and not os.path.ismount(data_dir):
+            raise RuntimeError("Persistent storage is required but SESSION_DATA_DIR is not a mounted volume. Attach the disk before starting the service.")
+        self.sessions_root = data_dir / "sessions"
         self.sessions_root.mkdir(parents=True, exist_ok=True)
         self._sessions_root_resolved = self.sessions_root.resolve()
 
