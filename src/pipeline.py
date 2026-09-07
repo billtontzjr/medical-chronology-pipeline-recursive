@@ -68,10 +68,11 @@ class MedicalChronologyPipeline:
         dropbox_token: Optional[str] = None,
         base_dir: Optional[str] = None,
         model: Optional[str] = None,
+        openai_api_key: Optional[str] = None,
     ) -> None:
         self.dropbox_tool = DropboxTool(access_token=dropbox_token, use_oauth=True)
         self.ocr_client = OCRClient(google_api_key)
-        self.chronology_agent = ChronologyAgent(anthropic_api_key, model=model)
+        self.chronology_agent = ChronologyAgent(anthropic_api_key, model=model, openai_api_key=openai_api_key)
 
         self.base_dir = str(Path(base_dir) if base_dir else Path(__file__).parent.parent)
         self.store = SessionStore(self.base_dir)
