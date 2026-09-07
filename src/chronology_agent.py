@@ -949,7 +949,11 @@ review_required rather than silently dropping medical evidence."""
             scope_file = batch_file.with_suffix('.scope.json')
             empty_complete = (batch_file.exists() and scope_file.exists()
                               and json.loads(scope_file.read_text()).get('empty_complete') is True)
-            if batch_file.exists() and (batch_file.stat().st_size > 0 or empty_complete):
+            deposition_evidence = batch_file.with_suffix('.deposition.json')
+            old_deposition = (batch[0].get('document_type') == 'deposition'
+                              and deposition_evidence.exists()
+                              and json.loads(deposition_evidence.read_text()).get('protocol_version', 1) < 2)
+            if batch_file.exists() and (batch_file.stat().st_size > 0 or empty_complete) and not old_deposition:
                 if (batch[0].get('document_type') == 'deposition'
                         and not batch_file.with_suffix('.deposition.json').exists()):
                     raise DepositionReviewRequired('Saved deposition summary lacks its evidence file. Start a new run; existing results were preserved.')
@@ -969,7 +973,9 @@ review_required rather than silently dropping medical evidence."""
                     f"📝 Batch {batch_num}/{total_batches} ({len(batch)} docs)…"
                 )
             if len(batch) == 1 and batch[0].get('document_type') == 'deposition':
-                batch_md, evidence = summarize(batch[0], self._call_api_with_retry)
+                batch_md, evidence = summarize(batch[0], self._call_api_with_retry,
+                    checkpoint_path=batch_file.with_suffix('.deposition-work.json'),
+                    model=getattr(self, 'model', None), progress_callback=progress_callback)
                 evidence_path = batch_file.with_suffix('.deposition.json')
                 evidence_tmp = evidence_path.with_suffix('.json.tmp')
                 evidence_tmp.write_text(json.dumps(evidence, indent=2), encoding='utf-8')
