@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 LIVE_MSG_PATTERN = re.compile(r"Page\s+\d+\s*/\s*\d+")
 
 from src.session_model import saved_model
+from src.manual_review import DRAFT_LABEL
 from src.word_export import chronology_docx, output_zip
 from src.pipeline import DEFAULT_DESTINATION_PREFIX, MedicalChronologyPipeline
 from src.session_state import (
@@ -119,7 +120,9 @@ def render_phase_tracker(state: SessionState, container) -> None:
         col.caption(status)
 
 
-def session_badge(status: str) -> str:
+def session_badge(status: str, manual_review_count: int = 0) -> str:
+    if status == STATUS_COMPLETE and manual_review_count:
+        return f"🟠 {DRAFT_LABEL} ({manual_review_count} source sections)"
     icons = {
         "pending": "⚪",
         STATUS_COMPLETE: "🟢",
@@ -173,7 +176,7 @@ def run_session_with_progress(
     result = asyncio.run(pipeline.run(session_id, progress_callback=_cb))
 
     if result["status"] == "complete":
-        status_box.update(label="✅ Pipeline complete", state="complete")
+        status_box.update(label=(DRAFT_LABEL if result.get("manual_review_count") else "✅ Pipeline complete"), state="complete")
     elif result["status"] == "paused":
         status_box.update(label="⏸ Paused — you can resume anytime", state="running")
     else:
@@ -234,6 +237,9 @@ def _render_completed_session(
     current-session panel AND the Sessions tab expander). Streamlit
     requires every widget key to be unique across the whole script run.
     """
+    if state.phases[PHASE_HEADER].data.get('manual_review_count'):
+        st.warning(DRAFT_LABEL + '. Download the manual-review list with the chronology. '
+                   'Uncertain source sections are withheld; automated verification does not resolve these flags.')
     st.markdown("### 📄 Generated files")
     out_dir = Path(pipeline.store.output_dir(state.session_id))
     files = sorted([p for p in out_dir.iterdir() if p.is_file()])
@@ -312,7 +318,7 @@ def _render_completed_session(
 
         result = pipeline.verify_session(state.session_id, progress_callback=_verify_cb)
         if result.get("success"):
-            status_box.update(label="✅ Verification report saved", state="complete")
+            status_box.update(label=("Verification report saved—manual review remains" if result.get("manual_review_count") else "✅ Verification report saved"), state="complete")
             st.rerun()
         else:
             status_box.update(label="❌ Verification failed", state="error")
@@ -521,7 +527,7 @@ with tab_new:
             st.markdown("---")
             st.subheader(f"Current session: `{state.session_id}`")
             st.caption(
-                f"Status: {session_badge(state.status)}  •  "
+                f"Status: {session_badge(state.status, state.phases[PHASE_HEADER].data.get('manual_review_count', 0))}  •  "
                 f"Destination: `{state.destination_folder}`"
             )
             tracker = st.container()
@@ -575,7 +581,7 @@ with tab_sessions:
     else:
         for s in sessions:
             with st.expander(
-                f"{session_badge(s.status)}  **{s.session_id}**  "
+                f"{session_badge(s.status, s.phases[PHASE_HEADER].data.get('manual_review_count', 0))}  **{s.session_id}**  "
                 f"•  patient: `{s.patient_id or '—'}`  •  updated {s.updated_at}",
                 expanded=(s.status in (STATUS_IN_PROGRESS, STATUS_PAUSED, STATUS_FAILED)),
             ):

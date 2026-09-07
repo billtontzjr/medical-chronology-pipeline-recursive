@@ -12,6 +12,7 @@ import logging
 from .deposition import (prepare_document, source_chunks, cover_dates, summarize,
                          DepositionReviewRequired)
 from .scope_recovery import screen_batch
+from .manual_review import collect_manual_reviews, review_markdown, DRAFT_LABEL
 from .session_model import batch_signature
 from .chronology_scope import (screen_source, SCOPE_RULES,
                                excluded_entry_category, ScopeReviewRequired)
@@ -588,6 +589,7 @@ If no issues found in any entries, output "No issues found."
             if entries and "MEDICAL RECORDS SUMMARY" in entries[0]:
                 entries = entries[1:]
 
+            entries = [e for e in entries if not e.startswith(DRAFT_LABEL + '.')]
             if not entries or not documents:
                 return {
                     'success': False, 'review_status': 'incomplete',
@@ -854,7 +856,7 @@ review_required and give a specific reason rather than silently dropping medical
         # thinking tokens count against max_tokens
         return screen_batch(prompt, documents, self._call_api_with_retry,
                             model=getattr(self, 'model', None), checkpoint=checkpoint_path,
-                            progress=progress_callback)
+                            progress=progress_callback, allow_manual_review=True)
 
     # ------------------------------------------------------------------ batches
     def _plan_batches(self, documents: List[Dict]) -> List[List[Dict]]:
@@ -986,9 +988,12 @@ review_required and give a specific reason rather than silently dropping medical
                     checkpoint_path=batch_file.with_suffix('.scope-work.json'),
                     progress_callback=progress_callback)
 
+            scope_work = batch_file.with_suffix('.scope-work.json')
+            manual_reviews = (json.loads(scope_work.read_text()).get('manual_reviews', [])
+                              if scope_work.exists() else [])
             scope_tmp = scope_file.with_suffix('.json.tmp')
             scope_tmp.write_text(json.dumps({'empty_complete': not batch_md.strip(),
-                                            'exclusions': exclusions}, indent=2), encoding='utf-8')
+                                            'exclusions': exclusions, 'manual_reviews': manual_reviews}, indent=2), encoding='utf-8')
             os.replace(scope_tmp, scope_file)
 
             # Write atomically so a crash mid-write doesn't leave a partial file
@@ -1191,12 +1196,14 @@ review_required and give a specific reason rather than silently dropping medical
             exclusions.extend(json.loads(source_exclusion_file.read_text(encoding='utf-8')))
         for scope_file in sorted(Path(batches_dir).glob('batch_*.scope.json')):
             exclusions.extend(json.loads(scope_file.read_text(encoding='utf-8')).get('exclusions', []))
-        if not body and not exclusions:
+        manual_reviews = collect_manual_reviews(batches_dir)
+        if not body and not exclusions and not manual_reviews:
             return {"success": False, "error": "No batch output files found to assemble"}
 
         # Extract identity only from sources retained by the generation screen.
         excluded_generation_files = {e['source_file'] for e in exclusions
                                      if e.get('stage') == 'generation_screen'}
+        excluded_generation_files.update(r['source_section'] for r in manual_reviews)
         header_info = self.extract_header(input_dir, progress_callback, excluded_generation_files)
         header = (
             "MEDICAL RECORDS SUMMARY\n"
@@ -1204,7 +1211,9 @@ review_required and give a specific reason rather than silently dropping medical
             f"Date of Birth: {header_info['date_of_birth']}\n"
             f"Date of Injury: {header_info['date_of_injury']}\n\n"
         )
-        chronology_md = header + body
+        review_notice = (DRAFT_LABEL + '. Uncertain source sections are withheld; '
+                         'see manual_review.docx or manual_review.md.\n\n') if manual_reviews else ''
+        chronology_md = header + review_notice + body
 
         # Real summary + gaps
         input_path = Path(input_dir)
@@ -1219,6 +1228,12 @@ review_required and give a specific reason rather than silently dropping medical
                         'gaps_md': 'The supplied material was excluded as nonmedical. See excluded_documents.json.'}
         summary_md = docs_md["summary_md"]
         gaps_md = docs_md["gaps_md"]
+        if manual_reviews:
+            if not body:
+                docs_md["summary_md"] = 'No dated entries are ready in this draft. Source sections require manual review.'
+                gaps_md = ''
+            summary_md = review_notice + docs_md["summary_md"]
+            gaps_md = review_markdown(manual_reviews) + '\n\n' + gaps_md
 
         # Structured JSON (proper serialization, no hand-rolled escaping)
         chronology_json = {
@@ -1234,6 +1249,8 @@ review_required and give a specific reason rather than silently dropping medical
             "source_files": source_files,
             "all_source_files": all_source_files,
             "excluded_materials": exclusions,
+            "manual_review_required": bool(manual_reviews),
+            "manual_reviews": manual_reviews,
             "encounter_consolidation": getattr(self, '_encounter_merges', []),
             "deposition_evidence": [json.loads(p.read_text(encoding='utf-8'))
                 for p in sorted(Path(batches_dir).glob('batch_*.deposition.json'))],
@@ -1250,6 +1267,14 @@ review_required and give a specific reason rather than silently dropping medical
             else:
                 tmp.write_text(text, encoding="utf-8")
             os.replace(tmp, path)
+
+        if manual_reviews:
+            review_text = review_markdown(manual_reviews)
+            for name, content in [('manual_review.json', json.dumps(manual_reviews, indent=2)),
+                                  ('manual_review.md', review_text),
+                                  ('manual_review.docx', chronology_docx(review_text))]:
+                _atomic_write(output_path / name, content)
+                files_written[name] = str(output_path / name)
 
         exclusions_file = output_path / 'excluded_documents.json'
         _atomic_write(exclusions_file, json.dumps(exclusions, indent=2))
@@ -1283,6 +1308,7 @@ review_required and give a specific reason rather than silently dropping medical
             "files": files_written,
             "header": header_info,
             "source_files": source_files,
+            "manual_review_count": len(manual_reviews),
         }
 
     # ------------------------------------------- legacy all-in-one convenience

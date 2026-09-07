@@ -27,6 +27,7 @@ from .chronology_agent import ChronologyAgent
 from .ocr_client import OCRClient
 from .ocr_coverage import collect_coverage, coverage_path, save_coverage
 from .deposition_evidence import atomic_json
+from .manual_review import collect_manual_reviews, review_markdown, DRAFT_LABEL
 from .session_state import (
     PauseRequested,
     SessionState,
@@ -147,16 +148,25 @@ class MedicalChronologyPipeline:
                 "error": "chronology.md does not exist for this session.",
             }
 
-        result = self.chronology_agent.verify_chronology(
-            chronology_path=str(chronology_path),
-            extracted_dir=str(self.store.extracted_dir(session_id)),
-            progress_callback=progress_callback,
-        )
+        pending_reviews = collect_manual_reviews(self.store.batches_dir(session_id))
+        has_entries = re.search(r'^\d{1,2}/\d{1,2}/\d{4}\b', chronology_path.read_text(), re.M)
+        if pending_reviews and not has_entries:
+            result = {'success': True, 'verification': 'No dated entries are available for automated verification. '
+                      'All withheld source sections remain pending manual review.', 'documents_checked': 0}
+        else:
+            result = self.chronology_agent.verify_chronology(
+                chronology_path=str(chronology_path),
+                extracted_dir=str(self.store.extracted_dir(session_id)),
+                progress_callback=progress_callback,
+            )
         if not result.get("success"):
             return result
 
         report_path = self.store.output_dir(session_id) / "verification.md"
         report_text = result.get("verification", "")
+        if pending_reviews:
+            report_text = (review_markdown(pending_reviews) + '\n\nAUTOMATED VERIFICATION OF DRAFT\n\n'
+                           + report_text)
         report_path.write_text(report_text, encoding="utf-8")
         state.phases[PHASE_SUMMARY].data["verification_report"] = str(report_path)
         self.store.save(state)
@@ -164,6 +174,7 @@ class MedicalChronologyPipeline:
             "success": True,
             "verification_path": str(report_path),
             "documents_checked": result.get("documents_checked", 0),
+            "manual_review_count": len(pending_reviews),
         }
 
     # --------------------------------------------------------------- pause API
@@ -265,7 +276,9 @@ class MedicalChronologyPipeline:
             state = self.store.load(session_id)
             state.status = STATUS_COMPLETE
             self.store.save(state)
-            cb("🎉 Pipeline complete.")
+            review_count = state.phases[PHASE_HEADER].data.get('manual_review_count', 0)
+            cb(f"⚠️ {DRAFT_LABEL}: {review_count} source section(s)." if review_count
+               else "🎉 Pipeline complete.")
 
             return {
                 "status": "complete",
@@ -274,6 +287,7 @@ class MedicalChronologyPipeline:
                 "output_dir": str(self.store.output_dir(session_id)),
                 "destination_folder": state.destination_folder,
                 "output_files": self._list_output_files(session_id),
+                "manual_review_count": review_count,
             }
 
         except PauseRequested as e:
@@ -440,7 +454,8 @@ class MedicalChronologyPipeline:
         self.store.update_phase_data(
             state,
             PHASE_HEADER,
-            {"patient_header": result.get("header", {})},
+            {"patient_header": result.get("header", {}),
+             "manual_review_count": result.get("manual_review_count", 0)},
         )
 
     async def _phase_upload(
