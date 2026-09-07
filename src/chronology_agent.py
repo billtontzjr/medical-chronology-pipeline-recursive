@@ -272,52 +272,15 @@ class ChronologyAgent:
         return has_billing_content and not has_clinical_content
 
     def _deduplicate_entries(self, entries: List[str]) -> List[str]:
-        """
-        Remove duplicate entries for the same date/facility/provider.
-
-        When duplicates are found, clinical entries are always preferred over
-        billing-derived entries; among entries of the same kind, the longest
-        (most detailed) is kept. Entries sharing a date but with different
-        facilities or providers are all kept, since they represent distinct
-        visits that each belong in the chronology.
-
-        Args:
-            entries: List of chronology entry strings
-
-        Returns:
-            Deduplicated list of entries
-        """
-        if not entries:
-            return entries
-
-        # Group entries by their dedup key
-        seen: Dict[Tuple[str, str, str], str] = {}
-        duplicates_removed = 0
-
+        """Remove only identical text (ignoring whitespace); retain distinct encounters."""
+        seen = set()
+        result = []
         for entry in entries:
-            key = self._extract_entry_key(entry)
-
-            if key in seen:
-                duplicates_removed += 1
-                existing = seen[key]
-                existing_is_billing = self._is_billing_entry(existing)
-                entry_is_billing = self._is_billing_entry(entry)
-
-                # Clinical content always wins over billing content
-                if existing_is_billing and not entry_is_billing:
-                    seen[key] = entry
-                elif entry_is_billing and not existing_is_billing:
-                    pass  # keep existing clinical entry
-                elif len(entry) > len(existing):
-                    # Same kind: keep the longer/more detailed entry
-                    seen[key] = entry
-            else:
-                seen[key] = entry
-
-        if duplicates_removed > 0:
-            self.logger.info(f"Removed {duplicates_removed} duplicate entries (clinical preferred over billing)")
-
-        return list(seen.values())
+            key = " ".join(entry.split())
+            if key not in seen:
+                seen.add(key)
+                result.append(entry)
+        return result
 
     def _sort_entries_chronologically(self, entries_text: str) -> str:
         """
@@ -526,10 +489,10 @@ class ChronologyAgent:
 
         entries_text = "\n\n".join(entries)
         
-        # Prepare source text (limit length per doc to avoid context limits)
+        # Preserve all source text. Bound each request by grouping whole chunks upstream.
         source_text = ""
         for doc in relevant_docs:
-            source_text += f"=== DOCUMENT: {doc['filename']} ===\n{doc['content'][:15000]}\n\n"
+            source_text += f"=== DOCUMENT: {doc['filename']} ===\n{doc['content']}\n\n"
 
         prompt = f"""You are a medical record auditor. Verify these chronology entries against the provided source documents.
 
@@ -592,68 +555,99 @@ If no issues found in any entries, output "No issues found."
             if entries and "MEDICAL RECORDS SUMMARY" in entries[0]:
                 entries = entries[1:]
 
+            if not entries or not documents:
+                return {
+                    'success': False, 'review_status': 'incomplete',
+                    'error': 'Verification requires chronology entries and readable source documents.',
+                    'documents_checked': 0, 'entries_reviewed': 0,
+                }
+
             verification_results = []
-            
-            # Group entries by date
             entries_by_date = {}
-            for entry in entries:
+            unreviewed = 0
+            reviewed = 0
+            for index, entry in enumerate(entries, 1):
                 date_match = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})', entry)
-                if date_match:
-                    try:
-                        m, d, y = date_match.groups()
-                        date_obj = datetime(int(y), int(m), int(d))
-                        date_str = date_obj.strftime('%m/%d/%Y')
-                        
-                        if date_str not in entries_by_date:
-                            entries_by_date[date_str] = []
-                        entries_by_date[date_str].append(entry)
-                    except ValueError:
-                        continue
+                try:
+                    if not date_match:
+                        raise ValueError('Missing date')
+                    m, d, y = date_match.groups()
+                    date_str = datetime(int(y), int(m), int(d)).strftime('%m/%d/%Y')
+                    # A date range must be split/anchored by encounter before verification.
+                    if re.match(r'^\d{1,2}/\d{1,2}/\d{4}\s*(?:[–—−-]|to)\s*\d', entry):
+                        raise ValueError('Grouped date range')
+                    entries_by_date.setdefault(date_str, []).append(entry)
+                except ValueError:
+                    unreviewed += 1
+                    verification_results.append(
+                        f'Entry {index}: Not reviewed. Missing/invalid date or grouped date range; '
+                        'review each service date against its source records.'
+                    )
 
-            total_dates = len(entries_by_date)
-            processed_dates = 0
-
-            if progress_callback:
-                progress_callback(f"🕵️ Verifying {len(entries)} entries across {total_dates} dates...")
-
-            # Verify each date group
+            source_chunks_reviewed = set()
             for date_str, date_entries in entries_by_date.items():
-                processed_dates += 1
-                if progress_callback:
-                    progress_callback(f"Checking {date_str} ({processed_dates}/{total_dates})...")
-
                 relevant_docs = date_map.get(date_str, [])
-                
                 if not relevant_docs:
-                    # No docs found for this date - flag as potential hallucination
-                    for entry in date_entries:
-                        verification_results.append(
-                            f"Entry Date: {date_str}\n"
-                            f"Issue Type: Potential Hallucination (No Source)\n"
-                            f"Description: No source documents found containing the date {date_str}. "
-                            f"This entry may be hallucinated or the date is incorrect.\n"
-                            f"Severity: Critical\n"
-                        )
+                    unreviewed += len(date_entries)
+                    verification_results.append(
+                        f'Entry Date: {date_str}\nIssue Type: Source not matched\n'
+                        'Description: No readable source chunk matched this date. '
+                        'This is a source-matching gap, not proof of hallucination.\nSeverity: Review'
+                    )
                     continue
+                # Review one entry at a time against every matched chunk in bounded groups.
+                # Never silently truncate a source. Partial negative results do not prove a
+                # claim unsupported across the entire file; retain them for human reconciliation.
+                groups, group, size = [], [], 0
+                for doc in relevant_docs:
+                    if group and size + len(doc['content']) > 60000:
+                        groups.append(group)
+                        group, size = [], 0
+                    group.append(doc)
+                    size += len(doc['content'])
+                if group:
+                    groups.append(group)
+                for entry in date_entries:
+                    complete = True
+                    for group_index, group in enumerate(groups, 1):
+                        if progress_callback:
+                            progress_callback(f'Checking {date_str}, source group {group_index}/{len(groups)}...')
+                        result = self._verify_entry_batch([entry], group)
+                        if not result or not result.strip():
+                            complete = False
+                            verification_results.append(f'{date_str}: Empty reviewer response; review incomplete.')
+                            continue
+                        source_chunks_reviewed.update(doc['filename'] for doc in group)
+                        # Only an exact clean response is treated as no candidate issue.
+                        if result.strip().casefold() not in ('no issues found.', 'no issues found'):
+                            verification_results.append(
+                                f'{date_str}, source group {group_index}/{len(groups)}:\n{result}'
+                            )
+                    if complete:
+                        reviewed += 1
+                    else:
+                        unreviewed += 1
 
-                # Verify against relevant docs
-                result = self._verify_entry_batch(date_entries, relevant_docs)
-                if result and "No issues found" not in result:
-                    verification_results.append(result)
-
-            # Compile final report
-            if not verification_results:
-                final_report = "✅ No significant issues detected. All entries verified against source documents."
+            summary = (
+                '# AI-assisted review report\n\n'
+                f'Entries reviewed: {reviewed} of {len(entries)}. '
+                f'Entries not reviewed: {unreviewed}.\n\n'
+                'This review uses date-matched OCR text. It does not certify clinical accuracy '
+                'or completeness, validate all date roles, or establish that every source encounter '
+                'appears in the chronology. Findings from separate source groups require reconciliation '
+                'against the original records. Human source review is required.'
+            )
+            if verification_results:
+                summary += '\n\n## Findings and coverage gaps\n\n' + '\n\n'.join(verification_results)
             else:
-                final_report = "# ⚠️ Verification Issues Found\n\n" + "\n\n".join(verification_results)
-
-            if progress_callback:
-                progress_callback("✅ Verification complete!")
-
+                summary += '\n\nNo candidate issues were returned by the AI review.'
             return {
                 'success': True,
-                'verification': final_report,
-                'documents_checked': len(documents)
+                'review_status': 'incomplete' if unreviewed else 'human_review_required',
+                'verification': summary,
+                'documents_checked': len(source_chunks_reviewed),
+                'entries_reviewed': reviewed,
+                'entries_unreviewed': unreviewed,
             }
 
         except Exception as e:
