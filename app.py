@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 # updates in place, instead of scrolling a new line for every page.
 LIVE_MSG_PATTERN = re.compile(r"Page\s+\d+\s*/\s*\d+")
 
+from src.word_export import chronology_docx
 from src.pipeline import DEFAULT_DESTINATION_PREFIX, MedicalChronologyPipeline
 from src.session_state import (
     PHASE_DOWNLOAD,
@@ -58,6 +59,7 @@ DROPBOX_APP_SECRET = _env("DROPBOX_APP_SECRET")
 DROPBOX_REFRESH_TOKEN = _env("DROPBOX_REFRESH_TOKEN")
 GOOGLE_CLOUD_API_KEY = _env("GOOGLE_CLOUD_API_KEY")
 ANTHROPIC_API_KEY = _env("ANTHROPIC_API_KEY")
+OPENAI_API_KEY = _env("OPENAI_API_KEY")
 
 DROPBOX_OAUTH_OK = bool(DROPBOX_APP_KEY and DROPBOX_APP_SECRET and DROPBOX_REFRESH_TOKEN)
 
@@ -66,23 +68,26 @@ DROPBOX_OAUTH_OK = bool(DROPBOX_APP_KEY and DROPBOX_APP_SECRET and DROPBOX_REFRE
 # User-facing model options. The key is what appears in the selectbox; the
 # value is the model ID sent to the Anthropic API.
 MODEL_OPTIONS = {
-    "Opus 5 — recommended (highest accuracy, lowest hallucination risk)": "claude-opus-5",
+    "OpenAI GPT-6 Astra": "gpt-6-astra",
+    "Claude Fable 5.1": "claude-fable-5-1",
+    "Claude Opus 5": "claude-opus-5",
     "Sonnet 4.6 — balanced quality & cost": "claude-sonnet-4-6",
     "Sonnet 4.5 — tested baseline (fallback)": "claude-sonnet-4-5-20250929",
     "Haiku 4.5 — fastest and cheapest (lower quality)": "claude-haiku-4-5-20251001",
 }
-DEFAULT_MODEL_LABEL = "Opus 5 — recommended (highest accuracy, lowest hallucination risk)"
+DEFAULT_MODEL_LABEL = "Claude Opus 5"
 
 
 @st.cache_resource(show_spinner=False)
 def get_pipeline(
-    google_api_key: str, anthropic_api_key: str, model_id: str
+    google_api_key: str, anthropic_api_key: str, model_id: str, openai_api_key: str = ""
 ) -> MedicalChronologyPipeline:
     return MedicalChronologyPipeline(
         google_api_key=google_api_key,
         anthropic_api_key=anthropic_api_key,
         dropbox_token=DROPBOX_REFRESH_TOKEN,
         model=model_id,
+        openai_api_key=openai_api_key,
     )
 
 
@@ -187,6 +192,22 @@ def _render_completed_session(
     if not files:
         st.warning("No output files found.")
         return
+
+    chronology_path = out_dir / "chronology.md"
+    if chronology_path.exists():
+        separate_billing = st.checkbox(
+            "Move entries labeled billing record only to a Word appendix",
+            value=True, key=f"billing_word_{key_prefix}_{state.session_id}",
+            help="Uses explicit labels already in the draft. Does not decide whether clinical notes exist, remove duplicates, or verify facts. Markdown stays unchanged.",
+        )
+        st.download_button(
+            "Download chronology as Word (.docx)",
+            data=chronology_docx(chronology_path.read_text(encoding="utf-8"), separate_billing=separate_billing),
+            file_name="chronology.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key=f"word_{key_prefix}_{state.session_id}",
+        )
+        st.caption("Word export formats the existing draft without another AI call. Review against source records before relying on it.")
 
     # Build an in-memory ZIP so the user can download everything at once
     # (goes to the browser's Downloads folder — the web equivalent of the
@@ -314,26 +335,21 @@ with st.sidebar:
         st.error("❌ Anthropic API key missing")
         anthropic_key_input = st.text_input("Anthropic API Key", type="password")
 
-    st.markdown("### 🧠 Claude model")
-    env_default_model = os.getenv("ANTHROPIC_MODEL", "").strip()
-    # If an env var pins the model, keep that selection locked in.
-    if env_default_model:
-        # Try to find a matching UI label; otherwise keep the raw model ID.
-        env_label = next(
-            (k for k, v in MODEL_OPTIONS.items() if v == env_default_model),
-            f"Env override: {env_default_model}",
-        )
-        st.info(f"Model pinned by `ANTHROPIC_MODEL` env var: {env_default_model}")
-        selected_model_id = env_default_model
+    openai_key_input = OPENAI_API_KEY or ""
+    if OPENAI_API_KEY:
+        st.success("OpenAI API key loaded")
     else:
-        default_idx = list(MODEL_OPTIONS.keys()).index(DEFAULT_MODEL_LABEL)
-        selected_label = st.selectbox(
-            "Model",
-            options=list(MODEL_OPTIONS.keys()),
-            index=default_idx,
-            help="Picking a different model takes effect on the NEXT phase that calls Claude. Already-written batches won't be regenerated.",
-        )
-        selected_model_id = MODEL_OPTIONS[selected_label]
+        openai_key_input = st.text_input("OpenAI API Key (for Astra)", type="password")
+
+    st.markdown("### 🧠 Chronology model")
+    env_default_model = os.getenv("ANTHROPIC_MODEL", "").strip()
+    default_idx = next((i for i, v in enumerate(MODEL_OPTIONS.values()) if v == env_default_model),
+                       list(MODEL_OPTIONS).index(DEFAULT_MODEL_LABEL))
+    selected_label = st.selectbox(
+        "Model", options=list(MODEL_OPTIONS), index=default_idx,
+        help="Start a NEW run to compare models. Resuming a run keeps existing batches; changing models does not regenerate them.",
+    )
+    selected_model_id = MODEL_OPTIONS[selected_label]
     st.caption(f"Using: `{selected_model_id}`")
 
     st.markdown("---")
@@ -347,12 +363,13 @@ with st.sidebar:
 
 
 # Short-circuit: require the essentials
-KEYS_OK = bool(DROPBOX_OAUTH_OK and google_key_input and anthropic_key_input)
+selected_key = openai_key_input if selected_model_id.startswith("gpt-") else anthropic_key_input
+KEYS_OK = bool(DROPBOX_OAUTH_OK and google_key_input and selected_key)
 if not KEYS_OK:
     st.warning("Configure the API keys in the sidebar (or your `.env`) to continue.")
     st.stop()
 
-pipeline = get_pipeline(google_key_input, anthropic_key_input, selected_model_id)
+pipeline = get_pipeline(google_key_input, anthropic_key_input or "", selected_model_id, openai_key_input)
 
 # Top-level session routing via ?session_id= query param (makes resume links shareable)
 # (Use st.query_params where available; fall back gracefully.)
