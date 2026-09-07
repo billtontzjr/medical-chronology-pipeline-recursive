@@ -19,9 +19,7 @@ class ChronologyAgent:
     """Generate medical chronologies using direct Anthropic API calls."""
 
     # Default model. Override per-run via the UI selector, or globally via
-    # the ANTHROPIC_MODEL env var. Opus 5 is the most accurate option for
-    # medical-legal chronology work, where hallucination risk matters more
-    # than the modest cost difference over Sonnet.
+    # the ANTHROPIC_MODEL env var. Accuracy must be evaluated against source records.
     DEFAULT_MODEL = "claude-opus-5"
 
     # Models that still accept sampling parameters (temperature). Opus 4.7+
@@ -36,7 +34,7 @@ class ChronologyAgent:
         "claude-3",
     )
 
-    def __init__(self, api_key: str, model: Optional[str] = None):
+    def __init__(self, api_key: str, model: Optional[str] = None, openai_api_key: Optional[str] = None):
         """
         Initialize the chronology agent.
 
@@ -51,14 +49,15 @@ class ChronologyAgent:
 
         self.model = model or os.getenv("ANTHROPIC_MODEL") or self.DEFAULT_MODEL
 
-        # A plain float timeout is accepted by every SDK generation. Passing
-        # a custom httpx.Client breaks on the 1.x SDK, whose HTTP layer
-        # moved to httpx2 and rejects an httpx.Client instance.
-        self.client = Anthropic(
-            api_key=api_key,
-            timeout=300.0,   # 5 minutes per request
-            max_retries=5,   # More retries for network issues
-        )
+        self.provider = "openai" if self.model.startswith("gpt-") else "anthropic"
+        if self.provider == "openai":
+            from openai import OpenAI
+            self.client = OpenAI(
+                api_key=(openai_api_key or os.getenv("OPENAI_API_KEY", "")).strip(),
+                timeout=300.0, max_retries=2,
+            )
+        else:
+            self.client = Anthropic(api_key=api_key, timeout=300.0, max_retries=5)
         self.logger = logging.getLogger(__name__)
 
     def _call_api_with_retry(self, prompt: str, max_tokens: int = 8000, max_retries: int = 5) -> str:
@@ -76,13 +75,22 @@ class ChronologyAgent:
         Raises:
             Exception: If all retries fail
         """
+        if self.provider == "openai":
+            response = self.client.responses.create(
+                model=self.model, input=prompt, reasoning={"effort": "high"},
+                max_output_tokens=min(128000, max_tokens + 16000), store=False,
+            )
+            if response.status != "completed" or not response.output_text.strip():
+                raise RuntimeError("OpenAI returned an incomplete or empty response; this batch was not saved. Retry with a smaller batch.")
+            return response.output_text.strip()
+
         base_delay = 2  # Start with 2 second delay
 
         # temperature is only sent to models that still support it; newer
         # models (Opus 4.7+, Claude 5 family) return a 400 if it is present
         request_kwargs = {
             "model": self.model,
-            "max_tokens": max_tokens,
+            "max_tokens": min(128000, max_tokens + 16000) if self.model.startswith("claude-fable-") else max_tokens,
             "messages": [{"role": "user", "content": prompt}],
         }
         if self.model.startswith(self._TEMPERATURE_SUPPORTED_PREFIXES):
@@ -91,13 +99,18 @@ class ChronologyAgent:
         for attempt in range(max_retries):
             try:
                 response = self.client.messages.create(**request_kwargs)
+                if response.stop_reason != "end_turn":
+                    raise RuntimeError("Claude returned an incomplete response; this batch was not saved. Retry with a smaller batch.")
                 # Newer models may include thinking blocks in content;
                 # extract only the text blocks
                 text_parts = [
                     block.text for block in response.content
                     if getattr(block, "type", None) == "text"
                 ]
-                return "\n".join(text_parts).strip()
+                result = "\n".join(text_parts).strip()
+                if not result:
+                    raise RuntimeError("Claude returned no text; this batch was not saved.")
+                return result
 
             except (APIError, APIStatusError) as e:
                 error_message = str(e).lower()
