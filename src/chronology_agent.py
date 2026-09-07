@@ -8,11 +8,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Callable, Tuple
 from datetime import datetime
 import logging
-import hashlib
 
 from .deposition import (prepare_document, source_chunks, cover_dates, summarize,
                          DepositionReviewRequired)
-from .chronology_scope import (screen_source, SCOPE_RULES, parse_scoped_response,
+from .scope_recovery import screen_batch
+from .session_model import batch_signature
+from .chronology_scope import (screen_source, SCOPE_RULES,
                                excluded_entry_category, ScopeReviewRequired)
 from .encounters import clean_labels, consolidate
 from .word_export import chronology_docx
@@ -704,7 +705,8 @@ If no issues found in any entries, output "No issues found."
     def _process_batch(self, documents: List[Dict], batch_num: int, total_batches: int) -> str:
         return self._process_scoped_batch(documents, batch_num, total_batches)[0]
 
-    def _process_scoped_batch(self, documents: List[Dict], batch_num: int, total_batches: int) -> Tuple[str, List[Dict]]:
+    def _process_scoped_batch(self, documents: List[Dict], batch_num: int, total_batches: int,
+                              *, checkpoint_path=None, progress_callback=None) -> Tuple[str, List[Dict]]:
         """
         Process a batch of documents and return chronology markdown.
 
@@ -834,7 +836,7 @@ For all other visit types (general medical, follow-ups, etc.):
 
 **OUTPUT:**
 Return STRICT JSON, no code fences or commentary:
-{{"sources": [{{"id": "D001", "scope": "medical|mixed|excluded",
+{{"sources": [{{"id": "D001", "scope": "medical|mixed|excluded|review_required",
 "category": "correspondence|legal_filing|records_administration|cost_projection|other_nonmedical",
 "reason": "Reason for exclusion, if excluded"}}],
 "entries": [{{"record_type": "clinical_care|medical_evaluation|diagnostic_test|medical_billing",
@@ -846,12 +848,13 @@ sources when merging duplicate clinical records). Excluded sources must never
 support a medical entry. If ALL sources are nonmedical, return entries: [].
 Do not create an entry to explain an exclusion. Do not output a chronology header.
 If classification or a medical attachment is ambiguous, flag the source scope as
-review_required rather than silently dropping medical evidence."""
+review_required and give a specific reason rather than silently dropping medical evidence."""
 
         # Call Claude with retry logic. Generous budget: on reasoning models,
         # thinking tokens count against max_tokens
-        raw = self._call_api_with_retry(prompt, max_tokens=16000)
-        return parse_scoped_response(raw, documents)
+        return screen_batch(prompt, documents, self._call_api_with_retry,
+                            model=getattr(self, 'model', None), checkpoint=checkpoint_path,
+                            progress=progress_callback)
 
     # ------------------------------------------------------------------ batches
     def _plan_batches(self, documents: List[Dict]) -> List[List[Dict]]:
@@ -916,10 +919,7 @@ review_required rather than silently dropping medical evidence."""
 
         # A changed batching algorithm must not reuse old outputs by ordinal.
         # Preserve all old files and require a fresh run on any mismatch.
-        signature = hashlib.sha256(json.dumps({
-            'version': 'same-day-care-v3', 'source_exclusions': source_exclusions, 'model': getattr(self, 'model', None),
-            'batches': batches,
-        }, sort_keys=True).encode()).hexdigest()
+        signature = batch_signature(batches, source_exclusions, getattr(self, 'model', None))
         manifest = batches_path / 'batch_manifest.json'
         if manifest.exists():
             if json.loads(manifest.read_text()).get('signature') != signature:
@@ -928,7 +928,7 @@ review_required rather than silently dropping medical evidence."""
             raise DepositionReviewRequired('Saved batches predate transcript-aware summaries. Start a new run; existing results were preserved.')
         else:
             tmp_manifest = manifest.with_suffix('.json.tmp')
-            tmp_manifest.write_text(json.dumps({'signature': signature, 'total_batches': total_batches}))
+            tmp_manifest.write_text(json.dumps({'signature': signature, 'total_batches': total_batches, 'model': getattr(self, 'model', None)}))
             os.replace(tmp_manifest, manifest)
 
         exclusion_file = batches_path / 'source_exclusions.json'
@@ -982,7 +982,9 @@ review_required rather than silently dropping medical evidence."""
                 os.replace(evidence_tmp, evidence_path)
                 exclusions = []
             else:
-                batch_md, exclusions = self._process_scoped_batch(batch, batch_num, total_batches)
+                batch_md, exclusions = self._process_scoped_batch(batch, batch_num, total_batches,
+                    checkpoint_path=batch_file.with_suffix('.scope-work.json'),
+                    progress_callback=progress_callback)
 
             scope_tmp = scope_file.with_suffix('.json.tmp')
             scope_tmp.write_text(json.dumps({'empty_complete': not batch_md.strip(),

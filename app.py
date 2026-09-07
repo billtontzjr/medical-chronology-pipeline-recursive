@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 # updates in place, instead of scrolling a new line for every page.
 LIVE_MSG_PATTERN = re.compile(r"Page\s+\d+\s*/\s*\d+")
 
+from src.session_model import saved_model
 from src.word_export import chronology_docx, output_zip
 from src.pipeline import DEFAULT_DESTINATION_PREFIX, MedicalChronologyPipeline
 from src.session_state import (
@@ -140,12 +141,24 @@ def recent_destinations(pipeline: MedicalChronologyPipeline, limit: int = 5) -> 
     return seen
 
 
+def _pipeline_for_saved_run(pipeline, session_id):
+    model = saved_model(pipeline.chronology_agent, pipeline.store.extracted_dir(session_id),
+                        pipeline.store.batches_dir(session_id), MODEL_OPTIONS.values())
+    st.info(f"Saved run model: {model}. The sidebar model applies to new runs.")
+    return get_pipeline(google_key_input, anthropic_key_input or "", model, openai_key_input)
+
+
 def run_session_with_progress(
     pipeline: MedicalChronologyPipeline,
     session_id: str,
     *,
     key_prefix: str,
 ) -> None:
+    try:
+        pipeline = _pipeline_for_saved_run(pipeline, session_id)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
     status_box = st.status("Running pipeline…", expanded=True)
     with status_box:
         live_slot = st.empty()
@@ -187,6 +200,25 @@ def _render_source_review(pipeline, state, key_prefix):
             st.download_button(f"Download deposition review details ({path.stem.split('.')[0]})",
                                path.read_bytes(), file_name=path.name, mime="application/json",
                                key=f"{key_prefix}_diagnostic_{state.session_id}_{path.name}")
+
+    scope_details = sorted(pipeline.store.batches_dir(state.session_id).glob('batch_*.scope-work.json'))
+    for path in scope_details:
+        details = json.loads(path.read_text())
+        if details.get('status') != 'blocked':
+            continue
+        batch_name = path.name.split('.')[0]
+        with st.expander(f"Source-screening review: {batch_name}", expanded=True):
+            st.write("Completed batches are saved. This batch needs review before generation can continue.")
+            attempts = details.get('attempts', [])
+            if attempts:
+                st.write(attempts[-1].get('error', 'Review the saved source classifications.'))
+                st.json(attempts[-1].get('details', []))
+            st.write("Source IDs for this batch:")
+            st.json(details.get('sources', []))
+            st.caption("The download contains private source summaries and rejected responses.")
+            st.download_button(f"Download source-screening review details ({batch_name})",
+                               path.read_bytes(), file_name=path.name, mime="application/json",
+                               key=f"{key_prefix}_scope_{state.session_id}_{path.name}")
 
 
 def _render_completed_session(
@@ -268,6 +300,11 @@ def _render_completed_session(
         use_container_width=True,
     )
     if verify_now:
+        try:
+            pipeline = _pipeline_for_saved_run(pipeline, state.session_id)
+        except ValueError as exc:
+            st.error(str(exc))
+            return
         status_box = st.status("Verifying chronology…", expanded=True)
 
         def _verify_cb(msg: str) -> None:
@@ -359,8 +396,8 @@ with st.sidebar:
     default_idx = next((i for i, v in enumerate(MODEL_OPTIONS.values()) if v == env_default_model),
                        list(MODEL_OPTIONS).index(DEFAULT_MODEL_LABEL))
     selected_label = st.selectbox(
-        "Model", options=list(MODEL_OPTIONS), index=default_idx,
-        help="Start a NEW run to compare models. Resuming a run keeps existing batches; changing models does not regenerate them.",
+        "Model for new runs", options=list(MODEL_OPTIONS), index=default_idx,
+        help="Saved runs resume and verify with their original model. Choose a model here for a new run.",
     )
     selected_model_id = MODEL_OPTIONS[selected_label]
     st.caption(f"Using: `{selected_model_id}`")
