@@ -59,6 +59,17 @@ def test_safe_local_path_rejects_parent_segments(tmp_path: Path) -> None:
         _safe_local_path(str(tmp_path), "../report.pdf")
 
 
+def test_download_target_symlink_cannot_replace_another_file(tmp_path):
+    original = tmp_path / 'original.pdf'
+    original.write_bytes(b'preserve original')
+    target = tmp_path / 'cache'
+    target.mkdir()
+    (target / 'download.pdf').symlink_to(original)
+    with pytest.raises(ValueError, match='symbolic link'):
+        _safe_local_path(str(target), 'download.pdf')
+    assert original.read_bytes() == b'preserve original'
+
+
 def test_phase_ocr_recognizes_nested_extracted_text(tmp_path: Path) -> None:
     pipeline = MedicalChronologyPipeline.__new__(MedicalChronologyPipeline)
     pipeline.store = SessionStore(str(tmp_path))
@@ -93,4 +104,3 @@ def test_phase_ocr_recognizes_nested_extracted_text(tmp_path: Path) -> None:
     asyncio.run(pipeline._phase_ocr(state, messages.append))
 
     assert messages == ["   ↳ all PDFs already OCR'd, skipping"]
-

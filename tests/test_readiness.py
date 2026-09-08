@@ -223,3 +223,10 @@ def test_complete_pipeline_download_ocr_generate_export_upload_and_resume(tmp_pa
     assert len(calls) == 1
     assert asyncio.run(p.run(state.session_id))['status'] == 'complete'
     assert len(calls) == 1 and len(dbx.calls) == 2
+    output = p.store.output_dir(state.session_id) / 'chronology.md'
+    preserved = output.read_bytes()
+    next(p.store.extracted_dir(state.session_id).rglob('*.txt')).write_text('Changed extraction')
+    result = asyncio.run(p.run(state.session_id))
+    assert result['status'] == 'failed' and 'Start a refreshed run' in result['error']
+    assert output.read_bytes() == preserved
+    assert len(calls) == 1
