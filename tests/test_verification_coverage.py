@@ -8,6 +8,7 @@ from src.session_state import SessionStore
 def make_agent():
     a = ChronologyAgent.__new__(ChronologyAgent)
     a.logger = logging.getLogger('coverage-test')
+    a.model = 'synthetic-model'
     return a
 
 
@@ -77,3 +78,4 @@ def test_session_survives_store_recreation(tmp_path,monkeypatch):
     store=SessionStore(str(tmp_path/'application'))
     store.create(session_id='p_20260101_120000',patient_id='p',dropbox_link='',destination_folder='/out')
     assert SessionStore(str(tmp_path/'new_application')).load('p_20260101_120000').patient_id=='p'
+

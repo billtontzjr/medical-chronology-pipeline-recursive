@@ -1,3 +1,4 @@
+from pathlib import Path
 """Source uncertainty produces an explicitly incomplete, reviewable draft."""
 import io
 import json
@@ -153,10 +154,15 @@ def test_completed_session_ui_shows_manual_review_status(tmp_path, monkeypatch):
     monkeypatch.setattr(MedicalChronologyPipeline, '__init__', init)
     for key in ('DROPBOX_APP_KEY','DROPBOX_APP_SECRET','DROPBOX_REFRESH_TOKEN','GOOGLE_CLOUD_API_KEY','ANTHROPIC_API_KEY'):
         monkeypatch.setenv(key, 'synthetic-not-real')
+    monkeypatch.setenv('TEAM_PASSWORD', 'synthetic-team-password')
     st.cache_resource.clear()
-    app = AppTest.from_file('app.py'); app.query_params['session_id'] = 'synthetic'; app.run()
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')); app.query_params['session_id'] = 'synthetic'
+    app.run()
+    app.text_input[0].set_value('synthetic-team-password')
+    app.button[0].click().run()
     assert not app.exception
     assert any(DRAFT_LABEL in x.value for x in app.warning)
     assert any(DRAFT_LABEL in x.value for x in app.caption)
     assert any('manual_review.md' in x.proto.label for x in app.get('download_button'))
     st.cache_resource.clear()
+

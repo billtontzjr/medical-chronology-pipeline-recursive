@@ -8,11 +8,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Callable, Tuple
 from datetime import datetime
 import logging
+import hashlib
+from .deposition_evidence import atomic_json
 
 from .deposition import (prepare_document, source_chunks, cover_dates, summarize,
                          DepositionReviewRequired)
 from .scope_recovery import screen_batch
 from .manual_review import collect_manual_reviews, review_markdown, DRAFT_LABEL
+from .billing import reconcile_billing, export_records
 from .session_model import batch_signature
 from .chronology_scope import (screen_source, SCOPE_RULES,
                                excluded_entry_category, ScopeReviewRequired)
@@ -561,7 +564,8 @@ If no issues found in any entries, output "No issues found."
         self,
         chronology_path: str,
         extracted_dir: str,
-        progress_callback: Optional[Callable[[str], None]] = None
+        progress_callback: Optional[Callable[[str], None]] = None,
+        checkpoint_path=None,
     ) -> Dict:
         """
         Verify chronology against source documents using smart date matching.
@@ -597,6 +601,14 @@ If no issues found in any entries, output "No issues found."
                     'documents_checked': 0, 'entries_reviewed': 0,
                 }
 
+            signature = hashlib.sha256(json.dumps(
+                {'version': 1, 'model': self.model, 'chronology': chronology_text, 'documents': documents},
+                sort_keys=True).encode()).hexdigest()
+            work = {'signature': signature, 'results': {}}
+            if checkpoint_path and Path(checkpoint_path).exists():
+                saved = json.loads(Path(checkpoint_path).read_text())
+                if saved.get('signature') == signature:
+                    work = saved
             verification_results = []
             entries_by_date = {}
             unreviewed = 0
@@ -624,8 +636,10 @@ If no issues found in any entries, output "No issues found."
                     )
 
             source_chunks_reviewed = set()
+            entry_number = 0
             for date_str, date_entries in entries_by_date.items():
                 for entry in date_entries:
+                    entry_number += 1
                     if re.search(r'\bDeposition\.', entry[:250], re.I):
                         # Include ALL testimony slices from candidate transcripts,
                         # including slices with no date and dates spelled on covers.
@@ -658,8 +672,15 @@ If no issues found in any entries, output "No issues found."
                     complete = True
                     for group_index, group in enumerate(groups, 1):
                         if progress_callback:
-                            progress_callback(f'Checking {date_str}, source group {group_index}/{len(groups)}...')
-                        result = self._verify_entry_batch([entry], group)
+                            progress_callback(f'Entry {entry_number}/{len(entries)}: checking {date_str}, source group {group_index}/{len(groups)}...')
+                        key = hashlib.sha256(json.dumps([entry, group], sort_keys=True).encode()).hexdigest()
+                        result = work['results'].get(key)
+                        if result is None:
+                            result = self._verify_entry_batch([entry], group)
+                            if result and result.strip():
+                                work['results'][key] = result
+                                if checkpoint_path:
+                                    atomic_json(Path(checkpoint_path), work)
                         if not result or not result.strip():
                             complete = False
                             verification_results.append(f'{date_str}: Empty reviewer response; review incomplete.')
@@ -794,7 +815,7 @@ For all other visit types (general medical, follow-ups, etc.):
 - When a file contains BOTH billing/administrative records AND clinical records (chief complaint, HPI, exam, assessment) for the same date of service, ALWAYS build the entry from the CLINICAL record — NEVER from the billing record
 - Billing content includes: CPT codes, charge lists, itemized statements, ledgers, invoices, superbills, payment records
 - NEVER create an entry from billing content alone when a clinical note exists for that visit
-- If a date of service appears ONLY in billing records with no clinical note, do not fabricate clinical details — state only that the service was billed (e.g., "Office visit billed; no clinical note available in records.")
+- If a date of service appears ONLY in billing records with no clinical note, do not fabricate clinical details — state only that the service was billed. Never infer that clinical notes are unavailable or missing; source sections may be withheld for review or outside this batch.
 
 **5. FACILITY ATTRIBUTION (CRITICAL):**
 - Many records state the facility name ONLY ONCE at the top of the document. Carry that facility name forward and use it for EVERY entry generated from that document, including entries for later dates of service in the same document
@@ -1197,6 +1218,7 @@ review_required and give a specific reason rather than silently dropping medical
         for scope_file in sorted(Path(batches_dir).glob('batch_*.scope.json')):
             exclusions.extend(json.loads(scope_file.read_text(encoding='utf-8')).get('exclusions', []))
         manual_reviews = collect_manual_reviews(batches_dir)
+        body = reconcile_billing(body, bool(manual_reviews))
         if not body and not exclusions and not manual_reviews:
             return {"success": False, "error": "No batch output files found to assemble"}
 
@@ -1246,6 +1268,7 @@ review_required and give a specific reason rather than silently dropping medical
                 "batches": len(list(Path(batches_dir).glob("batch_*.md"))),
             },
             "chronology_markdown": chronology_md,
+            "records": export_records(body),
             "source_files": source_files,
             "all_source_files": all_source_files,
             "excluded_materials": exclusions,

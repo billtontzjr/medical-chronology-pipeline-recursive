@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
 
 # Set working directory
 WORKDIR /app
+ENV SESSION_DATA_DIR=/app/data REQUIRE_PERSISTENT_STORAGE=true
 
 # Copy requirements first (for better caching)
 COPY requirements.txt .
@@ -25,7 +26,7 @@ RUN mkdir -p data/input data/extracted data/output
 EXPOSE 8501
 
 # Health check
-HEALTHCHECK CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=5).read()" || exit 1
+HEALTHCHECK CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:' + __import__('os').getenv('PORT', '8501') + '/healthz', timeout=5).read()" || exit 1
 
 # Run Streamlit app
-CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]
+CMD ["python", "serve.py"]

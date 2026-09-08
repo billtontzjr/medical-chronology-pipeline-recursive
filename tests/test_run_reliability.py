@@ -1,3 +1,4 @@
+from pathlib import Path
 import asyncio
 import json
 import logging
@@ -20,6 +21,15 @@ def pipeline_at(tmp_path):
     state = pipeline.store.create(session_id='synthetic_test', patient_id='synthetic',
                                   dropbox_link='', destination_folder='/test-output')
     return pipeline, state
+
+
+def confirm_inventory(pipeline, state):
+    import hashlib
+    root = pipeline.store.input_dir(state.session_id)
+    manifest = [{'path': p.relative_to(root).as_posix(), 'size': p.stat().st_size,
+                 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
+                for p in root.rglob('*.pdf')]
+    pipeline.store.update_phase_data(state, PHASE_DOWNLOAD, {'manifest_version': 1, 'manifest': manifest})
 
 
 def test_ocr_distinguishes_blank_from_failed_page(monkeypatch):
@@ -83,6 +93,8 @@ def test_blank_page_coverage_requires_review_without_calling_it_service_failure(
     source, extracted = tmp_path / 'source', tmp_path / 'extracted'
     source.mkdir()
     pdf = source / 'test.pdf'; pdf.write_bytes(b'placeholder')
+    extracted.mkdir(exist_ok=True)
+    (extracted / 'test.txt').write_text('Synthetic text')
     save_coverage({'page_count': 2, 'page_results': [{'page': 1, 'status': 'text'},
                                                     {'page': 2, 'status': 'no_text'}]},
                   pdf, source, extracted)
@@ -94,6 +106,12 @@ def test_blank_page_coverage_requires_review_without_calling_it_service_failure(
 
 def test_failed_generation_marks_phase_failed_and_names_correct_model(tmp_path):
     pipeline, state = pipeline_at(tmp_path)
+    root = pipeline.store.input_dir(state.session_id)
+    extracted = pipeline.store.extracted_dir(state.session_id)
+    pdf = root / 'test.pdf'; pdf.write_bytes(b'placeholder')
+    (extracted / 'test.txt').write_text('Synthetic text')
+    save_coverage({'page_count': 1, 'page_results': [{'page': 1, 'status': 'text'}]}, pdf, root, extracted)
+    confirm_inventory(pipeline, state)
     for phase in (PHASE_DOWNLOAD, PHASE_OCR):
         pipeline.store.mark_phase(state, phase, STATUS_COMPLETE)
     async def fail(*args):
@@ -115,6 +133,7 @@ def test_partial_ocr_failure_blocks_generation_and_resume_retries_only_failed_fi
     extracted = pipeline.store.extracted_dir(state.session_id)
     for name in ('good', 'partial'):
         (source / f'{name}.pdf').write_bytes(b'placeholder')
+    confirm_inventory(pipeline, state)
     pipeline.store.mark_phase(state, PHASE_DOWNLOAD, STATUS_COMPLETE)
     calls = []
     class FakeOCR(OCRClient):
@@ -192,10 +211,13 @@ def test_failed_session_ui_shows_review_downloads_and_resume(tmp_path, monkeypat
     for key in ('DROPBOX_APP_KEY', 'DROPBOX_APP_SECRET', 'DROPBOX_REFRESH_TOKEN',
                 'GOOGLE_CLOUD_API_KEY', 'ANTHROPIC_API_KEY'):
         monkeypatch.setenv(key, 'synthetic-not-a-real-key')
+    monkeypatch.setenv('TEAM_PASSWORD', 'synthetic-team-password')
     st.cache_resource.clear()
-    app = AppTest.from_file('app.py')
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py'))
     app.query_params['session_id'] = state.session_id
     app.run()
+    app.text_input[0].set_value('synthetic-team-password')
+    app.button[0].click().run()
     assert not app.exception
     assert any('unknown OCR coverage' in w.value for w in app.warning)
     labels = [element.proto.label for element in app.get('download_button')]
@@ -205,3 +227,4 @@ def test_failed_session_ui_shows_review_downloads_and_resume(tmp_path, monkeypat
     assert any('Source-screening review' in e.label for e in app.expander)
     assert any('Run / Resume' in b.label and not b.disabled for b in app.button)
     st.cache_resource.clear()
+
