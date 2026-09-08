@@ -50,7 +50,7 @@ def parse_entry(text):
             if candidate and candidate not in {'not documented', 'not applicable'}:
                 provider = candidate
                 break
-    return {'date': date, 'provider': provider, 'kind': 'medical', 'text': text}
+    return {'date': date, 'provider': provider, 'kind': 'billing' if '(billing record only)' in text.lower() else 'medical', 'text': text}
 
 
 def group_entries(entries):
@@ -148,3 +148,4 @@ ENTRIES:
         tmp.write_text(json.dumps({'signature': signature, 'entries': outputs, 'merges': merges}, indent=2))
         tmp.replace(cache_path)
     return outputs, merges
+

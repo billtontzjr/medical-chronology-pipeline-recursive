@@ -3,6 +3,7 @@ import json
 import re
 
 from .deposition import transcript_structure
+from .billing import normalize_billing
 
 
 class ScopeReviewRequired(ValueError):
@@ -192,9 +193,12 @@ def parse_scoped_response(raw, documents):
             raise ScopeReviewRequired('A medical entry cites an excluded source; review the classification.')
         if not re.match(r'^\d{1,2}/\d{1,2}/\d{4}\b', text.strip()):
             raise ScopeReviewRequired('A medical entry has no dated encounter header.')
+        if category == 'medical_billing':
+            text = normalize_billing(text)
         kept.append(' '.join(text.split()))
         referenced.update(ids)
     for sid, source in dispositions.items():
         if source['scope'] in {'medical', 'mixed'} and sid not in referenced:
             raise ScopeReviewRequired('A retained medical source has no supported entry; review before omitting it.')
     return '\n\n'.join(kept), exclusions
+

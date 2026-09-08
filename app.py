@@ -20,7 +20,7 @@ LIVE_MSG_PATTERN = re.compile(r"Page\s+\d+\s*/\s*\d+")
 
 from src.session_model import saved_model
 from src.manual_review import DRAFT_LABEL
-from src.word_export import chronology_docx, output_zip
+from src.word_export import chronology_docx, output_zip, saved_records
 from src.pipeline import DEFAULT_DESTINATION_PREFIX, MedicalChronologyPipeline
 from src.session_state import (
     PHASE_DOWNLOAD,
@@ -45,6 +45,9 @@ st.set_page_config(
     page_icon="🏥",
     layout="wide",
 )
+
+from src.access_control import require_team_access
+require_team_access(st)
 
 
 # ---------------------------------------------------------------- env / keys
@@ -78,7 +81,6 @@ MODEL_OPTIONS = {
 DEFAULT_MODEL_LABEL = "Claude Opus 5"
 
 
-@st.cache_resource(show_spinner=False)
 def get_pipeline(
     google_api_key: str, anthropic_api_key: str, model_id: str, openai_api_key: str = ""
 ) -> MedicalChronologyPipeline:
@@ -188,6 +190,20 @@ def run_session_with_progress(
 
 
 def _render_source_review(pipeline, state, key_prefix):
+    if state.phases[PHASE_DOWNLOAD].status == STATUS_COMPLETE and not state.phases[PHASE_DOWNLOAD].data.get('manifest_version'):
+        st.warning('This older run has no confirmed source inventory. Start a refreshed run before relying on it for complete coverage.')
+    if st.button('Start refreshed run', key=f'refresh_{key_prefix}_{state.session_id}',
+                 help='Creates a new case run using the saved source link and original model. Downloads and extracts fresh copies into a new session; preserves the old draft.'):
+        try:
+            saved_pipeline = _pipeline_for_saved_run(pipeline, state.session_id)
+            refreshed = saved_pipeline.create_session(state.dropbox_link, state.patient_id)
+            # Pin the selected saved model before any generation takes place.
+            from src.session_model import save_model_config
+            save_model_config(saved_pipeline.store.extracted_dir(refreshed.session_id), saved_pipeline.chronology_agent.model)
+            st.session_state['active_session_id'] = refreshed.session_id
+            st.rerun()
+        except (ValueError, RuntimeError) as exc:
+            st.error(str(exc))
     coverage = state.phases[PHASE_OCR].data.get('coverage', {})
     if coverage.get('files_needing_review'):
         st.warning(f"{coverage['files_needing_review']} source file(s) have unread pages or unknown OCR coverage. "
@@ -247,16 +263,17 @@ def _render_completed_session(
         st.warning("No output files found.")
         return
 
+    separate_billing = False
     chronology_path = out_dir / "chronology.md"
     if chronology_path.exists():
         separate_billing = st.checkbox(
-            "Move entries labeled billing record only to a Word appendix",
+            "Move billing entries to a Word appendix",
             value=False, key=f"billing_word_{key_prefix}_{state.session_id}",
-            help="Uses explicit labels already in the draft. Does not decide whether clinical notes exist, remove duplicates, or verify facts. Markdown stays unchanged.",
+            help="Uses saved record types, with explicit-label support for older drafts. Does not decide whether clinical notes exist, remove duplicates, or verify facts. Markdown stays unchanged.",
         )
         st.download_button(
             "⬇️ Download Word document (.docx)",
-            data=chronology_docx(chronology_path.read_text(encoding="utf-8"), separate_billing=separate_billing),
+            data=chronology_docx(chronology_path.read_text(encoding="utf-8"), separate_billing=separate_billing, records=saved_records(out_dir)),
             file_name="chronology.docx",
             type="primary", use_container_width=True,
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -269,7 +286,7 @@ def _render_completed_session(
     # desktop). Built fresh on each render so it always reflects disk state.
     st.download_button(
         label="⬇️ Download all as ZIP (to your computer)",
-        data=output_zip(out_dir),
+        data=output_zip(out_dir, separate_billing=separate_billing),
         file_name=f"{state.session_id}.zip",
         mime="application/zip",
         key=f"dlzip_{key_prefix}_{state.session_id}",
@@ -299,7 +316,7 @@ def _render_completed_session(
             )
 
     st.markdown("### 🔍 Verify chronology")
-    st.caption("Runs an AI-assisted check against the extracted source text and saves verification.md.")
+    st.caption("Checks the extracted source text and saves verification.md. Completed source-group checks are saved; running verification again resumes unchanged work. Human review remains required.")
     verify_now = st.button(
         "Run verification",
         key=f"verify_{key_prefix}_{state.session_id}",
@@ -332,12 +349,12 @@ def _render_completed_session(
             "New Dropbox destination folder",
             value=state.destination_folder,
             help=(
-                "Enter a Dropbox path like `/Patients/Darelyn`, OR paste a "
+                "Enter a Dropbox path like `/Medical chronology pipeline outputs/New case`, OR paste a "
                 "Dropbox URL from your browser's address bar "
                 "(e.g. `https://www.dropbox.com/home/Team%20Folder/...`) — "
                 "the app converts it to a path automatically."
             ),
-            placeholder="/Patients/Darelyn  or  https://www.dropbox.com/home/…",
+            placeholder="/Medical chronology pipeline outputs/New case  or  https://www.dropbox.com/home/…",
         )
         if recents:
             picked = st.selectbox(
@@ -350,7 +367,11 @@ def _render_completed_session(
         if not new_dest:
             st.error("Destination is required.")
         else:
-            pipeline.update_destination(state.session_id, new_dest)
+            try:
+                pipeline.update_destination(state.session_id, new_dest)
+            except (ValueError, RuntimeError) as exc:
+                st.error(str(exc))
+                return
             status_box = st.status(f"Uploading to {new_dest}…", expanded=True)
 
             def _cb(msg: str) -> None:
@@ -413,7 +434,7 @@ with st.sidebar:
     st.markdown(
         "1. Paste a Dropbox shared link to a patient folder.\n"
         "2. Choose where on Dropbox the outputs go.\n"
-        "3. Start the run. Close the tab at any time — progress is saved.\n"
+        "3. Start the run. Completed stages and source reviews are saved.\n"
         "4. Come back to **Sessions** to resume, re-upload, or download."
     )
 
@@ -487,7 +508,7 @@ with tab_new:
                     "browser's address bar — the app converts URLs to paths "
                     "automatically."
                 ),
-                placeholder="/Patients/Darelyn  or  https://www.dropbox.com/home/…",
+                placeholder="/Medical chronology pipeline outputs/New case  or  https://www.dropbox.com/home/…",
             )
         destination = normalize_dropbox_folder(destination) if destination else default_dest
 
@@ -505,11 +526,15 @@ with tab_new:
             if final_destination == DEFAULT_DESTINATION_PREFIX or final_destination == default_dest:
                 # let the pipeline default handle it (session_id suffix)
                 final_destination = None
-            state = pipeline.create_session(
-                dropbox_link=dropbox_link,
-                patient_id=patient_id,
-                destination_folder=final_destination,
-            )
+            try:
+                state = pipeline.create_session(
+                    dropbox_link=dropbox_link,
+                    patient_id=patient_id,
+                    destination_folder=final_destination,
+                )
+            except ValueError as exc:
+                st.error(str(exc))
+                st.stop()
             st.session_state["active_session_id"] = state.session_id
             st.success(f"Session created: `{state.session_id}`")
             st.rerun()
@@ -519,7 +544,7 @@ with tab_new:
     if live_sid:
         try:
             state = pipeline.load_session(live_sid)
-        except FileNotFoundError:
+        except (FileNotFoundError, ValueError):
             st.session_state.pop("active_session_id", None)
             state = None
 
@@ -573,7 +598,7 @@ with tab_new:
 # -------------------------------------------------------------- SESSIONS tab
 with tab_sessions:
     st.header("Sessions")
-    st.caption("Every run is resumable. Close this tab anytime — work is checkpointed to disk.")
+    st.caption("Completed work is saved. If a browser or service stops, resume the case to continue from its last checkpoint.")
 
     sessions = pipeline.list_sessions()
     if not sessions:
@@ -617,12 +642,15 @@ with tab_sessions:
                         st.toast("Pause requested")
                 with col_del:
                     if st.button(
-                        "🗑️ Delete",
+                        "Archive",
                         key=f"del_{s.session_id}",
-                        help="Removes local session files. Does NOT delete Dropbox outputs.",
+                        help="Moves this session to the private archive. Preserves its files and Dropbox outputs.",
                     ):
-                        pipeline.store.delete(s.session_id)
-                        st.rerun()
+                        try:
+                            pipeline.archive_session(s.session_id)
+                            st.rerun()
+                        except RuntimeError as exc:
+                            st.error(str(exc))
 
                 if s.status == STATUS_COMPLETE:
                     _render_completed_session(pipeline, s, key_prefix="sessions")

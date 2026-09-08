@@ -33,7 +33,9 @@ def test_word_format_and_service_label():
     assert doc.styles['Normal'].font.size.pt == 12
     assert 'Visit Type:' not in doc.paragraphs[0].text
     assert 'Lumbar Block.' in doc.paragraphs[0].text
-    assert doc.paragraphs[0].paragraph_format.first_line_indent.inches == .5
+    assert doc.paragraphs[0].paragraph_format.first_line_indent.inches == 0
+    assert doc.paragraphs[0].alignment == 0
+    assert doc.styles['Normal'].paragraph_format.space_after.pt == 12
     assert 'PAGE' in doc.sections[0].footer._element.xml
 
 
@@ -48,3 +50,4 @@ def test_zip_handles_binary_word_and_old_sessions(tmp_path):
             doc = Document(io.BytesIO(archive.read('chronology.docx')))
             assert doc.paragraphs[0].text == markdown
             assert archive.read('chronology.md').decode() == markdown
+

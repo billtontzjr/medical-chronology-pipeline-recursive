@@ -1,5 +1,6 @@
 """Deterministic Word export of an existing chronology; no AI calls or factual edits."""
 import io
+import json
 import re
 import zipfile
 from docx import Document
@@ -10,7 +11,7 @@ from docx.oxml.ns import qn
 from .encounters import clean_labels
 
 DATE = r'\d{1,2}/\d{1,2}/\d{4}'
-BILLING_LABEL = re.compile(r'\(billing record only\)', re.I)
+BILLING_LABEL = re.compile(r'\(billing record only\)|\bChiropractic Therapy Billing\b|\bBilling[- ]only\b', re.I)
 
 
 def _display_text(text: str) -> str:
@@ -19,7 +20,7 @@ def _display_text(text: str) -> str:
     return re.sub(rf'({DATE})\s*[–—−-]\s*({DATE})', r'\1 to \2', text)
 
 
-def chronology_docx(markdown: str, *, separate_billing: bool = False) -> bytes:
+def chronology_docx(markdown: str, *, separate_billing: bool = False, records=None) -> bytes:
     """Preserve every entry, optionally relocate explicitly labeled billing entries.
 
     The label is taken from the existing draft, not independently validated.
@@ -38,7 +39,7 @@ def chronology_docx(markdown: str, *, separate_billing: bool = False) -> bytes:
         style.font.size = Pt(12)
         style.font.color.rgb = RGBColor(0, 0, 0)
         style.paragraph_format.space_before = Pt(0)
-        style.paragraph_format.space_after = Pt(10)
+        style.paragraph_format.space_after = Pt(12)
         style.paragraph_format.line_spacing = 1.0
         style.paragraph_format.widow_control = True
     doc.styles['Heading 1'].font.size = Pt(16)
@@ -49,11 +50,12 @@ def chronology_docx(markdown: str, *, separate_billing: bool = False) -> bytes:
     doc.core_properties.comments = ''
     blocks = [b.strip() for b in re.split(r'\n\s*\n', markdown.strip()) if b.strip()]
     clinical, billing = [], []
+    types = {r["text"]: r["record_type"] for r in (records or [])}
     for block in blocks:
         # Only explicit labels in a dated entry header qualify for relocation.
         header = block.splitlines()[0]
         target = billing if (separate_billing and re.match(DATE, header)
-                             and BILLING_LABEL.search(header)) else clinical
+                             and (types.get(block) == "medical_billing" if block in types else BILLING_LABEL.search(header))) else clinical
         target.append(block)
 
     def add_block(block):
@@ -66,8 +68,10 @@ def chronology_docx(markdown: str, *, separate_billing: bool = False) -> bytes:
                 p.add_run(line).bold = True
             return
         p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-        p.paragraph_format.first_line_indent = Inches(.5)
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        p.paragraph_format.left_indent = Inches(0)
+        p.paragraph_format.right_indent = Inches(0)
+        p.paragraph_format.first_line_indent = Inches(0)
         for i, line in enumerate(block.splitlines()):
             if i:
                 p.add_run().add_break()
@@ -83,7 +87,7 @@ def chronology_docx(markdown: str, *, separate_billing: bool = False) -> bytes:
     if billing:
         doc.add_page_break()
         doc.add_paragraph('Billing-only appendix', style='Heading 1')
-        doc.add_paragraph('These entries were labeled "billing record only" in the generated draft. '
+        doc.add_paragraph('These entries have explicit billing labels in the generated draft. '
                           'Their presence does not establish that clinical notes are missing. '
                           'Use them to reconcile bills with the source records.')
         for block in billing:
@@ -98,14 +102,24 @@ def chronology_docx(markdown: str, *, separate_billing: bool = False) -> bytes:
     return output.getvalue()
 
 
-def output_zip(output_dir):
+def saved_records(output_dir):
+    path = output_dir / 'chronology.json'
+    try:
+        return json.loads(path.read_text()).get('records', []) if path.exists() else []
+    except (ValueError, TypeError):
+        return []
+
+
+def output_zip(output_dir, *, separate_billing=False):
     """Package text and binary artifacts; supply Word for older saved sessions."""
     output = io.BytesIO()
     with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(output_dir.iterdir()):
-            if path.is_file():
+            if path.is_file() and path.name != 'chronology.docx':
                 archive.writestr(path.name, path.read_bytes())
         markdown = output_dir / 'chronology.md'
-        if markdown.exists() and not (output_dir / 'chronology.docx').exists():
-            archive.writestr('chronology.docx', chronology_docx(markdown.read_text(encoding='utf-8')))
+        if markdown.exists():
+            archive.writestr('chronology.docx', chronology_docx(markdown.read_text(encoding='utf-8'), separate_billing=separate_billing, records=saved_records(output_dir)))
+        elif (output_dir / 'chronology.docx').exists():
+            archive.writestr('chronology.docx', (output_dir / 'chronology.docx').read_bytes())
     return output.getvalue()

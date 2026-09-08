@@ -1,4 +1,4 @@
-streamlit>=1.31.0
+streamlit>=1.42.0,<2
 dropbox>=11.36.2
 python-dotenv>=1.0.0
 requests>=2.31.0
@@ -10,3 +10,5 @@ httpx>=0.27.0
 
 python-docx>=1.1.2,<2
 openai>=1.68.0,<3
+
+aiohttp>=3.14.3,<4

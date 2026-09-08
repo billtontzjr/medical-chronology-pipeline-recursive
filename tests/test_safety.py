@@ -55,8 +55,19 @@ def test_safe_local_path_rejects_parent_segments(tmp_path: Path) -> None:
     target = Path(_safe_local_path(str(tmp_path), "Imaging/report.pdf"))
     assert target == tmp_path / "Imaging" / "report.pdf"
 
-    escaped = Path(_safe_local_path(str(tmp_path), "../report.pdf"))
-    assert escaped == tmp_path / "report.pdf"
+    with pytest.raises(ValueError):
+        _safe_local_path(str(tmp_path), "../report.pdf")
+
+
+def test_download_target_symlink_cannot_replace_another_file(tmp_path):
+    original = tmp_path / 'original.pdf'
+    original.write_bytes(b'preserve original')
+    target = tmp_path / 'cache'
+    target.mkdir()
+    (target / 'download.pdf').symlink_to(original)
+    with pytest.raises(ValueError, match='symbolic link'):
+        _safe_local_path(str(target), 'download.pdf')
+    assert original.read_bytes() == b'preserve original'
 
 
 def test_phase_ocr_recognizes_nested_extracted_text(tmp_path: Path) -> None:
@@ -79,6 +90,9 @@ def test_phase_ocr_recognizes_nested_extracted_text(tmp_path: Path) -> None:
     nested_txt = extracted_dir / "Records" / "report.txt"
     nested_txt.parent.mkdir(parents=True)
     nested_txt.write_text("already extracted", encoding="utf-8")
+
+    from src.ocr_coverage import save_coverage
+    save_coverage({'page_count': 1, 'page_results': [{'page': 1, 'status': 'text'}]}, nested_pdf, input_dir, extracted_dir)
 
     class NoCallOCRClient:
         async def batch_extract(self, *args, **kwargs):

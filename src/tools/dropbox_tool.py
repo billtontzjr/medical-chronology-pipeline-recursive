@@ -10,6 +10,7 @@ from urllib.parse import unquote, urlparse
 import dropbox
 from dropbox.files import FileMetadata, FolderMetadata
 from dropbox.sharing import SharedLinkMetadata
+from ..output_safety import OUTPUT_ROOT, validate_destination
 
 
 logger = logging.getLogger(__name__)
@@ -93,14 +94,15 @@ def _dropbox_content_hash(path: str) -> str:
 def _safe_local_path(local_dir: str, relative_path: str) -> str:
     """Build a local path under local_dir from a Dropbox relative path."""
     base = Path(local_dir).resolve()
-    clean_parts = [
-        part
-        for part in relative_path.replace("\\", "/").split("/")
-        if part and part not in {".", ".."}
-    ]
+    parts = relative_path.replace("\\", "/").split("/")
+    if any(part in ('.', '..') for part in parts):
+        raise ValueError('Invalid relative source path')
+    clean_parts = [part for part in parts if part]
     if not clean_parts:
         raise ValueError("Empty Dropbox file path")
     target = base.joinpath(*clean_parts)
+    if target.is_symlink():
+        raise ValueError('Source download target must not be a symbolic link')
     resolved_parent = target.parent.resolve()
     if resolved_parent != base and base not in resolved_parent.parents:
         raise ValueError(f"Refusing to write outside download directory: {relative_path}")
@@ -167,30 +169,7 @@ class DropboxTool:
         Returns:
             Dropbox path starting with /
         """
-        # Already a path
-        if url_or_path.startswith('/'):
-            return url_or_path
-
-        # Parse URL
-        parsed = urlparse(url_or_path)
-
-        # Handle home URLs: https://www.dropbox.com/home/username/path
-        if '/home/' in parsed.path:
-            # Extract path after /home/username/
-            parts = parsed.path.split('/home/')
-            if len(parts) > 1:
-                # Get everything after the username
-                remaining = parts[1]
-                # Find the next slash (after username)
-                slash_idx = remaining.find('/')
-                if slash_idx != -1:
-                    path = remaining[slash_idx:]
-                    # URL decode (convert %20 to spaces, etc.)
-                    return unquote(path)
-
-        # For shared links or other URLs, return as-is
-        # (will be handled by the shared link API)
-        return url_or_path
+        return dropbox_url_to_path(url_or_path)
 
     def list_files(self, folder_path: str = "") -> List[Dict]:
         """
@@ -388,7 +367,7 @@ class DropboxTool:
             link_metadata = self.dbx.sharing_get_shared_link_metadata(shared_link)
 
             # If it's a file, download directly
-            if isinstance(link_metadata, dropbox.files.FileMetadata):
+            if isinstance(link_metadata, (dropbox.files.FileMetadata, dropbox.sharing.FileLinkMetadata)):
                 if any(link_metadata.name.lower().endswith(ext.lower())
                       for ext in extensions):
                     local_path = _safe_local_path(local_dir, link_metadata.name)
@@ -441,6 +420,9 @@ class DropboxTool:
                             except Exception as e:
                                 import logging
                                 logging.error(f"Error listing subfolder {entry.name}: {e}")
+                                results['success'] = False
+                                results['failed'].append({'name': subfolder_path, 'error': str(e),
+                                                          'operation': 'list_folder'})
 
                         # Process files
                         elif isinstance(entry, FileMetadata):
@@ -464,7 +446,7 @@ class DropboxTool:
                                     results['downloaded'].append({
                                         'success': True,
                                         'local_path': local_path,
-                                        'name': entry.name
+                                        'name': file_path.lstrip('/')
                                     })
                                 except Exception as e:
                                     import logging
@@ -501,7 +483,8 @@ class DropboxTool:
         A ``path/conflict/folder`` error means the folder already exists —
         that's fine.
         """
-        dropbox_folder = normalize_dropbox_folder(dropbox_folder)
+        dropbox_folder = (OUTPUT_ROOT if dropbox_folder.rstrip('/').casefold() == OUTPUT_ROOT.casefold()
+                          else validate_destination(dropbox_folder))
         if not dropbox_folder or dropbox_folder == "/":
             return
         try:
@@ -543,6 +526,7 @@ class DropboxTool:
         Returns:
             ``{'success': bool, ...}``. On failure, includes ``error``.
         """
+        dropbox_path = validate_destination(dropbox_path)
         if not os.path.exists(local_path):
             return {
                 "success": False,
@@ -557,13 +541,27 @@ class DropboxTool:
         last_error: Optional[str] = None
         for attempt in range(1, max_retries + 1):
             try:
+                try:
+                    existing = self.dbx.files_get_metadata(dropbox_path)
+                except dropbox.exceptions.ApiError as exc:
+                    if not (exc.error.is_path() and exc.error.get_path().is_not_found()):
+                        raise
+                else:
+                    if (getattr(existing, 'size', None) == local_size and
+                            getattr(existing, 'content_hash', None) == _dropbox_content_hash(local_path)):
+                        return {'success': True, 'dropbox_path': dropbox_path,
+                                'size': local_size, 'name': existing.name, 'verified': True}
+                    return {'success': False, 'error': 'Destination file already exists with different content. Choose a new output folder; existing files were preserved.',
+                            'dropbox_path': dropbox_path}
                 with open(local_path, "rb") as f:
                     file_data = f.read()
 
                 metadata = self.dbx.files_upload(
                     file_data,
                     dropbox_path,
-                    mode=dropbox.files.WriteMode.overwrite,
+                    mode=dropbox.files.WriteMode.add,
+                    autorename=False,
+                    strict_conflict=True,
                     mute=True,
                 )
 
@@ -628,7 +626,7 @@ class DropboxTool:
         Creates intermediate Dropbox folders as needed. Each file is uploaded
         with retry + content-hash verification (see :meth:`upload_file`).
         """
-        dropbox_folder = normalize_dropbox_folder(dropbox_folder)
+        dropbox_folder = validate_destination(dropbox_folder)
 
         results = {
             "success": True,

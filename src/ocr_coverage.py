@@ -1,4 +1,5 @@
 """Persist page-level extraction coverage without confusing it with accuracy."""
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -17,7 +18,12 @@ def save_coverage(result, pdf, input_dir, extracted_dir):
               'pages': pages, 'text_pages': sum(p['status'] == 'text' for p in pages),
               'no_text_pages': [p['page'] for p in pages if p['status'] == 'no_text'],
               'error_pages': [p['page'] for p in pages if p['status'] == 'error']}
-    report['technical_failure'] = bool(report['error_pages'] or not total or len(pages) != total)
+    report['technical_failure'] = bool(report['error_pages'] or not isinstance(total, int) or total < 1
+        or len(pages) != total or {p.get('page') for p in pages} != set(range(1, (total or 0) + 1))
+        or any(p.get('status') not in ('text', 'no_text', 'error') for p in pages))
+    report['source_sha256'] = hashlib.sha256(Path(pdf).read_bytes()).hexdigest()
+    txt = Path(extracted_dir) / Path(pdf).relative_to(input_dir).with_suffix('.txt')
+    report['text_sha256'] = hashlib.sha256(txt.read_bytes()).hexdigest() if txt.exists() else None
     report['needs_review'] = bool(report['technical_failure'] or report['no_text_pages'])
     atomic_json(coverage_path(pdf, input_dir, extracted_dir), report)
     return report
@@ -29,7 +35,16 @@ def collect_coverage(input_dir, extracted_dir):
     for pdf in sorted(p for p in input_dir.rglob('*') if p.suffix.lower() == '.pdf'):
         sidecar = coverage_path(pdf, input_dir, extracted_dir)
         if sidecar.exists():
-            report = json.loads(sidecar.read_text())
+            try:
+                report = json.loads(sidecar.read_text())
+                txt = extracted_dir / pdf.relative_to(input_dir).with_suffix('.txt')
+                if (report.get('source_sha256') != hashlib.sha256(pdf.read_bytes()).hexdigest() or
+                        (report.get('text_pages', 0) and (not txt.exists() or
+                         report.get('text_sha256') != hashlib.sha256(txt.read_bytes()).hexdigest()))):
+                    report.update(technical_failure=True, needs_review=True, coverage_status='stale_or_missing')
+            except (ValueError, TypeError):
+                report = {'source_file': str(pdf.relative_to(input_dir)), 'total_pages': None,
+                          'technical_failure': True, 'needs_review': True, 'coverage_status': 'invalid'}
         else:
             txt = extracted_dir / pdf.relative_to(input_dir).with_suffix('.txt')
             content = txt.read_text(encoding='utf-8') if txt.exists() else ''
@@ -44,3 +59,4 @@ def collect_coverage(input_dir, extracted_dir):
                     'Older runs have no saved page totals; their coverage is unknown.',
             'files': reports, 'files_needing_review': sum(r['needs_review'] for r in reports),
             'technical_failures': sum(r['technical_failure'] for r in reports)}
+

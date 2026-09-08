@@ -19,6 +19,9 @@ import asyncio
 import json
 import logging
 import re
+import shutil
+import uuid
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -43,10 +46,13 @@ from .session_state import (
     STATUS_IN_PROGRESS,
     STATUS_PAUSED,
 )
-from .tools.dropbox_tool import DropboxTool, normalize_dropbox_folder
+from .tools.dropbox_tool import DropboxTool
+from .output_safety import OUTPUT_ROOT, validate_destination
+from .session_lock import session_lock
+from .download_snapshot import download_snapshot
 
 
-DEFAULT_DESTINATION_PREFIX = "/Medical chronology pipeline outputs"
+DEFAULT_DESTINATION_PREFIX = OUTPUT_ROOT
 
 
 def safe_patient_id(patient_id: Optional[str]) -> str:
@@ -89,6 +95,21 @@ class MedicalChronologyPipeline:
         self.logger = logging.getLogger(__name__)
 
     # ------------------------------------------------------------ session mgmt
+    def _lock_path(self, session_id):
+        from .session_state import validate_session_id
+        root = self.store.sessions_root.parent / 'locks'
+        root.mkdir(parents=True, exist_ok=True)
+        return root / (validate_session_id(session_id) + '.lock')
+
+    def archive_session(self, session_id):
+        with session_lock(self._lock_path(session_id)):
+            source = self.store.session_dir(session_id)
+            target = self.store.sessions_root.parent / 'archive' / session_id
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                raise RuntimeError('An archived case already has this identifier.')
+            source.rename(target)
+
     def _default_destination(self, session_id: str) -> str:
         return f"{DEFAULT_DESTINATION_PREFIX}/{session_id}"
 
@@ -101,10 +122,9 @@ class MedicalChronologyPipeline:
         """Create a new session and persist initial state."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         patient_prefix = safe_patient_id(patient_id)
-        session_id = f"{patient_prefix}_{timestamp}" if patient_prefix else timestamp
-        destination = normalize_dropbox_folder(
-            destination_folder or self._default_destination(session_id)
-        )
+        session_id = (f"{patient_prefix}_{timestamp}" if patient_prefix else timestamp) + '_' + uuid.uuid4().hex[:8]
+        destination = validate_destination(
+            destination_folder or self._default_destination(session_id), dropbox_link)
         return self.store.create(
             session_id=session_id,
             patient_id=patient_prefix,
@@ -122,9 +142,13 @@ class MedicalChronologyPipeline:
         self.store.request_pause(session_id)
 
     def update_destination(self, session_id: str, new_destination: str) -> SessionState:
+        with session_lock(self._lock_path(session_id)):
+            return self._update_destination(session_id, new_destination)
+
+    def _update_destination(self, session_id: str, new_destination: str) -> SessionState:
         """Change where the outputs will be uploaded. Resets upload phase."""
         state = self.store.load(session_id)
-        state.destination_folder = normalize_dropbox_folder(new_destination)
+        state.destination_folder = validate_destination(new_destination, state.dropbox_link)
         # Reset upload so a future run re-uploads to the new destination
         up = state.phases.get(PHASE_UPLOAD)
         if up is not None:
@@ -135,6 +159,15 @@ class MedicalChronologyPipeline:
         return state
 
     def verify_session(
+        self, session_id: str, progress_callback=None,
+    ) -> Dict:
+        try:
+            with session_lock(self._lock_path(session_id)):
+                return self._verify_session(session_id, progress_callback)
+        except Exception as exc:
+            return {'success': False, 'error': str(exc)}
+
+    def _verify_session(
         self,
         session_id: str,
         progress_callback: Optional[Callable[[str], None]] = None,
@@ -158,16 +191,25 @@ class MedicalChronologyPipeline:
                 chronology_path=str(chronology_path),
                 extracted_dir=str(self.store.extracted_dir(session_id)),
                 progress_callback=progress_callback,
+                checkpoint_path=self.store.session_dir(session_id) / 'verification-work.json',
             )
         if not result.get("success"):
             return result
 
         report_path = self.store.output_dir(session_id) / "verification.md"
         report_text = result.get("verification", "")
+        coverage = collect_coverage(self.store.input_dir(session_id), self.store.extracted_dir(session_id))
+        if (not state.phases[PHASE_DOWNLOAD].data.get('manifest_version') or
+                coverage['files_needing_review'] or not coverage['files']):
+            report_text = ('SOURCE COMPLETENESS NOT ESTABLISHED. The source inventory or page extraction '
+                           'requires review. This report cannot establish that all original records were read.\n\n' + report_text)
+
         if pending_reviews:
             report_text = (review_markdown(pending_reviews) + '\n\nAUTOMATED VERIFICATION OF DRAFT\n\n'
                            + report_text)
-        report_path.write_text(report_text, encoding="utf-8")
+        temporary = report_path.with_suffix('.md.tmp')
+        temporary.write_text(report_text, encoding='utf-8')
+        temporary.replace(report_path)
         state.phases[PHASE_SUMMARY].data["verification_report"] = str(report_path)
         self.store.save(state)
         return {
@@ -175,6 +217,9 @@ class MedicalChronologyPipeline:
             "verification_path": str(report_path),
             "documents_checked": result.get("documents_checked", 0),
             "manual_review_count": len(pending_reviews),
+            "review_status": result.get('review_status', 'incomplete'),
+            "entries_reviewed": result.get('entries_reviewed', 0),
+            "entries_unreviewed": result.get('entries_unreviewed', 0),
         }
 
     # --------------------------------------------------------------- pause API
@@ -187,6 +232,15 @@ class MedicalChronologyPipeline:
 
     # -------------------------------------------------------------------- run
     async def run(
+        self, session_id: str, progress_callback=None,
+    ) -> Dict:
+        try:
+            with session_lock(self._lock_path(session_id)):
+                return await self._run_session(session_id, progress_callback)
+        except Exception as exc:
+            return {'status': 'failed', 'session_id': session_id, 'error': str(exc)}
+
+    async def _run_session(
         self,
         session_id: str,
         progress_callback: Optional[Callable[[str], None]] = None,
@@ -217,10 +271,17 @@ class MedicalChronologyPipeline:
                 await self._phase_download(state, cb)
                 self.store.mark_phase(state, PHASE_DOWNLOAD, STATUS_COMPLETE)
             else:
-                cb("⏭️  Phase 1/5: Download already complete — skipping")
+                self._validate_input_snapshot(state)
+                cb("⏭️  Phase 1/5: Saved source inventory checked — skipping download")
 
             # Phase 2 — OCR
             self._check_pause(session_id)
+            if state.phases[PHASE_GENERATE].status == STATUS_COMPLETE:
+                prior_coverage = collect_coverage(self.store.input_dir(session_id), self.store.extracted_dir(session_id))
+                if (prior_coverage['technical_failures'] or
+                        any(r.get('coverage_status') == 'unknown_legacy' for r in prior_coverage['files'])):
+                    raise RuntimeError('The saved extraction cannot be reconciled with this generated draft. Start a refreshed run; the existing draft is preserved.')
+
             if state.phases[PHASE_OCR].status != STATUS_COMPLETE:
                 self.store.mark_phase(state, PHASE_OCR, STATUS_IN_PROGRESS)
                 cb("🔎 Phase 2/5: Running OCR on PDFs…")
@@ -234,7 +295,7 @@ class MedicalChronologyPipeline:
             self.store.update_phase_data(state, PHASE_OCR, {'coverage': coverage})
             if coverage['files_needing_review']:
                 cb(f"⚠️ OCR coverage: {coverage['files_needing_review']} file(s) need page review; see the coverage report")
-            if coverage['technical_failures']:
+            if coverage['technical_failures'] or any(r.get('coverage_status') == 'unknown_legacy' for r in coverage['files']):
                 self.store.mark_phase(state, PHASE_OCR, STATUS_FAILED)
                 raise RuntimeError("OCR has failed or missing pages. Resume to retry extraction before generating a chronology.")
 
@@ -318,42 +379,46 @@ class MedicalChronologyPipeline:
             }
 
     # ------------------------------------------------------------------ phases
+    def _validate_input_snapshot(self, state):
+        data = state.phases[PHASE_DOWNLOAD].data
+        manifest = data.get('manifest')
+        if data.get('manifest_version') != 1 or not manifest:
+            raise RuntimeError('This older run has no confirmed source inventory. Use Start refreshed run to download and extract a new copy; the existing draft stays available.')
+        root = self.store.input_dir(state.session_id)
+        actual = {p.relative_to(root).as_posix() for p in root.rglob('*') if p.is_file() and p.suffix.lower() == '.pdf'}
+        if actual != {m['path'] for m in manifest}:
+            raise RuntimeError('Saved PDF inventory changed. Start a refreshed run before generating more output.')
+        for item in manifest:
+            path = root / item['path']
+            if path.stat().st_size != item['size'] or hashlib.sha256(path.read_bytes()).hexdigest() != item['sha256']:
+                raise RuntimeError('A saved PDF differs from the confirmed source inventory. Start a refreshed run.')
+
     async def _phase_download(
         self, state: SessionState, cb: Callable[[str], None]
     ) -> None:
-        input_dir = str(self.store.input_dir(state.session_id))
-        # Already-downloaded PDFs remain on disk; the tool overwrites on match
-        # so re-runs are safe. If any PDFs exist we assume the previous run
-        # downloaded everything (the download API doesn't support partial
-        # resume cleanly).
-        existing = list(Path(input_dir).rglob("*.pdf")) + list(Path(input_dir).rglob("*.PDF"))
-        if existing:
-            cb(f"   ↳ {len(existing)} PDF(s) already on disk, skipping re-download")
-            self.store.update_phase_data(
-                state,
-                PHASE_DOWNLOAD,
-                {"files": [str(p.relative_to(input_dir)) for p in existing]},
-            )
-            return
-
-        result = self.dropbox_tool.get_shared_link_files(
-            state.dropbox_link, input_dir, extensions=[".pdf", ".PDF"]
-        )
-        if not result["success"]:
-            raise RuntimeError(f"Dropbox download failed: {result.get('error')}")
-        downloaded = [d["name"] for d in result["downloaded"]]
-        if not downloaded:
-            raise RuntimeError("No PDF files found in the Dropbox link")
-        cb(f"   ↳ downloaded {len(downloaded)} PDFs")
-        self.store.update_phase_data(
-            state, PHASE_DOWNLOAD, {"files": downloaded}
-        )
+        input_dir = self.store.input_dir(state.session_id)
+        staged = self.store.session_dir(state.session_id) / 'download-cache'
+        manifest = download_snapshot(self.dropbox_tool, state.dropbox_link, staged, cb)
+        # Copy only this reconciled inventory; cache survives interruption.
+        expected = {item['path'] for item in manifest}
+        for old in input_dir.rglob('*'):
+            if old.is_file() and old.relative_to(input_dir).as_posix() not in expected:
+                old.unlink()
+        for item in manifest:
+            target = input_dir / item['path']
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_suffix(target.suffix + '.part')
+            shutil.copyfile(staged / item['path'], temporary)
+            temporary.replace(target)
+        self.store.update_phase_data(state, PHASE_DOWNLOAD,
+            {'files': sorted(expected), 'manifest': manifest, 'manifest_version': 1})
+        cb(f'   ↳ downloaded and reconciled {len(manifest)} PDFs')
 
     async def _phase_ocr(self, state: SessionState, cb: Callable[[str], None]) -> None:
         input_dir = self.store.input_dir(state.session_id)
         extracted_dir = self.store.extracted_dir(state.session_id)
 
-        pdf_paths = sorted(list(input_dir.rglob("*.pdf")) + list(input_dir.rglob("*.PDF")))
+        pdf_paths = sorted(p for p in input_dir.rglob('*') if p.is_file() and p.suffix.lower() == '.pdf')
         if not pdf_paths:
             raise RuntimeError("No downloaded PDFs found to OCR")
 
@@ -362,8 +427,14 @@ class MedicalChronologyPipeline:
         for p in pdf_paths:
             txt = extracted_dir / p.relative_to(input_dir).with_suffix(".txt")
             sidecar = coverage_path(p, input_dir, extracted_dir)
-            saved = json.loads(sidecar.read_text()) if sidecar.exists() else {}
-            if txt.exists() and txt.stat().st_size > 0 and not saved.get('technical_failure'):
+            try:
+                saved = json.loads(sidecar.read_text()) if sidecar.exists() else {}
+            except (ValueError, TypeError):
+                saved = {}
+            if (txt.exists() and txt.stat().st_size > 0 and saved.get('total_pages')
+                    and not saved.get('technical_failure')
+                    and saved.get('source_sha256') == hashlib.sha256(p.read_bytes()).hexdigest()
+                    and saved.get('text_sha256') == hashlib.sha256(txt.read_bytes()).hexdigest()):
                 continue
             pending.append(p)
 
@@ -398,7 +469,7 @@ class MedicalChronologyPipeline:
 
         coverage = collect_coverage(input_dir, extracted_dir)
         self.store.update_phase_data(state, PHASE_OCR, {'coverage': coverage})
-        if coverage['technical_failures']:
+        if coverage['technical_failures'] or any(r.get('coverage_status') == 'unknown_legacy' for r in coverage['files']):
             raise RuntimeError("OCR has failed or missing pages. Completed files are saved; resume to retry failed files.")
         # Verify at least something came out
         if not list(extracted_dir.rglob("*.txt")):
@@ -462,7 +533,7 @@ class MedicalChronologyPipeline:
         self, state: SessionState, cb: Callable[[str], None]
     ) -> None:
         output_dir = self.store.output_dir(state.session_id)
-        destination = normalize_dropbox_folder(state.destination_folder)
+        destination = validate_destination(state.destination_folder, state.dropbox_link)
 
         result = self.dropbox_tool.upload_folder(
             local_dir=str(output_dir),
@@ -476,6 +547,8 @@ class MedicalChronologyPipeline:
                 f"Dropbox upload failed for {len(failed_names)} file(s): "
                 f"{failed_names} — {result.get('error', '')}"
             )
+        if not result.get('uploaded') or not all(u.get('verified') for u in result['uploaded']):
+            raise RuntimeError('Upload returned without a verified content hash for every output. Resume to retry verification.')
         cb(f"   ↳ uploaded {len(result['uploaded'])} files (verified)")
         self.store.update_phase_data(
             state,
