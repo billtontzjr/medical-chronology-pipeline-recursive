@@ -61,8 +61,11 @@ def create_app(upstream='http://127.0.0.1:8502', secret=None):
     app.cleanup_ctx.append(session_context)
 
     async def handle(request):
+        # no-referrer makes basic browser form POSTs send Origin: null.
+        # Keep the login form same-origin without allowing opaque origins.
+        referrer_policy = 'same-origin' if request.path == '/login' else 'no-referrer'
         headers = {'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
-                   'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY'}
+                   'Referrer-Policy': referrer_policy, 'X-Frame-Options': 'DENY'}
         password = configured_password()
         if request.path == '/healthz':
             try:

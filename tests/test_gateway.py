@@ -65,6 +65,52 @@ def test_gateway_protects_downloads_websockets_and_logout(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_login_form_policy_preserves_same_origin_post(monkeypatch):
+    monkeypatch.setenv('TEAM_PASSWORD', PASSWORD)
+    async def scenario():
+        async with TestClient(TestServer(create_app(secret=SECRET))) as client:
+            page = await client.get('/login')
+            assert page.status == 200
+            assert '<form method="post" action="/login">' in await page.text()
+            # Basic browser form navigation suppresses Origin under no-referrer.
+            policy = page.headers['Referrer-Policy']
+            origin = 'null' if policy == 'no-referrer' else str(client.make_url('').origin())
+            response = await client.post('/login', data={'password': PASSWORD},
+                                         headers={'Origin': origin}, allow_redirects=False)
+            assert response.status == 303
+            assert policy == 'same-origin'
+            assert response.headers['Location'] == '/'
+            assert response.cookies[COOKIE]['secure']
+            assert response.cookies[COOKIE]['httponly']
+            assert response.cookies[COOKIE]['samesite'] == 'Strict'
+            private = await client.get('/media/denied.docx')
+            assert private.status == 401
+            assert private.headers['Referrer-Policy'] == 'no-referrer'
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('origin', ['null', 'https://foreign.invalid'])
+@pytest.mark.parametrize('path', ['/login', '/_stcore/upload_file', '/_stcore/stream'])
+def test_login_fix_does_not_allow_opaque_or_foreign_origins(monkeypatch, origin, path):
+    monkeypatch.setenv('TEAM_PASSWORD', PASSWORD)
+    monkeypatch.setattr('serve.password_matches', lambda *a: pytest.fail('Reject origin before password validation'))
+    monkeypatch.setattr('serve.attempt_allowed', lambda: pytest.fail('Reject origin before counting login attempts'))
+    async def scenario():
+        async with TestClient(TestServer(create_app(secret=SECRET))) as client:
+            headers = {'Origin': origin, 'X-Forwarded-Host': 'foreign.invalid'}
+            if path == '/_stcore/stream':
+                with pytest.raises(aiohttp.WSServerHandshakeError) as error:
+                    await client.ws_connect(path, headers=headers)
+                assert error.value.status == 403
+            else:
+                response = await client.post(path, headers=headers, data={'password': PASSWORD},
+                                             allow_redirects=False)
+                assert response.status == 403
+                assert await response.text() == 'Origin not allowed.'
+                assert COOKIE not in response.cookies
+    asyncio.run(scenario())
+
+
 def test_gateway_without_password_fails_closed(monkeypatch):
     monkeypatch.delenv('TEAM_PASSWORD', raising=False)
     async def scenario():
