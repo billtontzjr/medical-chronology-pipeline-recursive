@@ -4,6 +4,7 @@ import re
 
 from .deposition import transcript_structure
 from .billing import normalize_billing
+from .source_fidelity import DiagnosticEvidenceError, render_diagnostic
 
 
 class ScopeReviewRequired(ValueError):
@@ -151,6 +152,7 @@ def parse_scoped_response(raw, documents):
                                           code='conflicting_source', details=[seen[sid], source])
             seen[sid] = source
     lookup = {f'D{i:03d}': d['filename'] for i, d in enumerate(documents, 1)}
+    evidence_lookup = {f'D{i:03d}': d for i, d in enumerate(documents, 1)}
     dispositions, exclusions = {}, []
     for source in data['sources']:
         if not isinstance(source, dict):
@@ -181,8 +183,14 @@ def parse_scoped_response(raw, documents):
         category, ids, text = entry.get('record_type'), entry.get('source_ids'), entry.get('text')
         if (not isinstance(category, str) or category not in INCLUDED | EXCLUDED or not isinstance(ids, list) or not ids
                 or any(not isinstance(sid, str) or sid not in lookup for sid in ids)
-                or not isinstance(text, str) or not text.strip()):
+                or (category != 'diagnostic_test' and (not isinstance(text, str) or not text.strip()))):
             raise ScopeReviewRequired('Entry lacks a recognized record type, text or source reference.')
+        if category == 'diagnostic_test':
+            try:
+                text = render_diagnostic(entry, evidence_lookup)
+            except DiagnosticEvidenceError as exc:
+                raise ScopeReviewRequired(str(exc), code='diagnostic_source_review',
+                                          details=[{'source_ids': ids}]) from exc
         forced_exclusion = excluded_entry_category(text)
         if category in EXCLUDED or forced_exclusion:
             for sid in ids:

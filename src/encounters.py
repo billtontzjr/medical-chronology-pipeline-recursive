@@ -3,9 +3,10 @@ import hashlib
 import json
 import re
 from datetime import datetime
+from .source_fidelity import RESULT_LABEL
 
 
-BODY_LABEL = re.compile(r'\b(?:Chief Complaint|History(?: of Present Illness)?|HPI|HOPI|Subjective|Clinical Indication|Physical Exam(?:ination)?|Exam|Assessment(?:/Plan)?|Impression|Diagnosis|Plan)\s*:', re.I)
+BODY_LABEL = re.compile(r'\b(?:Chief Complaint|History(?: of Present Illness)?|HPI|HOPI|Subjective|Clinical Indication|Physical Exam(?:ination)?|Exam|Assessment(?:/Plan)?|Impression|Conclusion|Interpretation|Findings|Results|Diagnosis|Plan)\s*:', re.I)
 CREDENTIALS = r'(?:MD|DO|DC|RN|NP|FNP-C|APRN|PA-C|PA|PT|DPT|OT|PhD)'
 UNKNOWN = re.compile(r'\b(?:not (?:documented|legible|reliably|confidently)|unknown|unavailable|illegible|name.*not|providers)\b', re.I)
 
@@ -50,7 +51,12 @@ def parse_entry(text):
             if candidate and candidate not in {'not documented', 'not applicable'}:
                 provider = candidate
                 break
-    return {'date': date, 'provider': provider, 'kind': 'billing' if '(billing record only)' in text.lower() else 'medical', 'text': text}
+    kind = 'billing' if '(billing record only)' in text.lower() else 'medical'
+    if kind == 'medical' and boundary and RESULT_LABEL.match(boundary.group()):
+        # Never route quote-only diagnostic entries through another generative
+        # rewrite; preserve their source-validated body even on the same day.
+        kind = 'diagnostic'
+    return {'date': date, 'provider': provider, 'kind': kind, 'text': text}
 
 
 def group_entries(entries):
@@ -86,7 +92,7 @@ class ConsolidationReviewRequired(ValueError):
 def consolidate(entries, call_api, cache_path=None, model=None):
     """Merge same-day care without dropping procedures; retain a review trail."""
     entries = [clean_labels(e) for e in entries]
-    signature = hashlib.sha256(json.dumps({'version': 1, 'entries': entries, 'model': model}, sort_keys=True).encode()).hexdigest()
+    signature = hashlib.sha256(json.dumps({'version': 2, 'entries': entries, 'model': model}, sort_keys=True).encode()).hexdigest()
     if cache_path is not None and cache_path.exists():
         cached = json.loads(cache_path.read_text())
         if cached.get('signature') == signature:

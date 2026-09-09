@@ -226,5 +226,17 @@ def test_failed_session_ui_shows_review_downloads_and_resume(tmp_path, monkeypat
     assert any('source-screening review details' in label for label in labels)
     assert any('Source-screening review' in e.label for e in app.expander)
     assert any('Run / Resume' in b.label and not b.disabled for b in app.button)
+    # Exercise the actual button, not just the presence of a helper symbol.
+    from src.session_model import save_model_config
+    save_model_config(pipeline.store.batches_dir(state.session_id), 'gpt-6-astra')
+    original = pipeline.store.state_path(state.session_id).read_bytes()
+    next(b for b in app.button if b.label == 'Start refreshed run').click().run()
+    assert not app.exception
+    refreshed_id = app.session_state['active_session_id']
+    assert refreshed_id != state.session_id
+    assert pipeline.store.load(refreshed_id).dropbox_link == state.dropbox_link
+    assert json.loads((pipeline.store.batches_dir(refreshed_id) / 'run_model.json').read_text())['model'] == 'gpt-6-astra'
+    assert not (pipeline.store.extracted_dir(refreshed_id) / 'run_model.json').exists()
+    assert pipeline.store.state_path(state.session_id).read_bytes() == original
     st.cache_resource.clear()
 
