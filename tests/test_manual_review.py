@@ -16,13 +16,18 @@ from src.pipeline import MedicalChronologyPipeline
 from src.session_state import SessionStore, PHASE_HEADER
 
 DOCS = [{'filename': 'chiro.txt (part 2)', 'source_file': 'chiro.txt', 'content': 'unclear date'},
-        {'filename': 'imaging.txt', 'content': 'MRI results'}]
+        {'filename': 'imaging.txt', 'content': 'Date of service: 06/04/2026\nFacility: Imaging\n'
+         'Provider: Radiologist, MD\nStudy: MRI\nImpression: Disc protrusion.'}]
 CLEAR = '06/04/2026. Imaging. Radiologist, MD. MRI. Impression: Disc protrusion.'
 UNCLEAR = '07/12/2014. Clinic. Provider unclear. Office Visit. Back pain.'
 DATA = {'sources': [{'id': 'D001', 'scope': 'review_required', 'reason': 'Page 48 date unclear.'},
                     {'id': 'D002', 'scope': 'medical'}],
         'entries': [{'record_type': 'clinical_care', 'source_ids': ['D001'], 'text': UNCLEAR},
-                    {'record_type': 'diagnostic_test', 'source_ids': ['D002'], 'text': CLEAR}]}
+                    {'record_type': 'diagnostic_test', 'source_ids': ['D002'],
+                     'diagnostic_result': {'date': '06/04/2026', 'facility': 'Imaging',
+                         'provider': 'Radiologist, MD', 'study': 'MRI',
+                         'evidence': [{'source_id': 'D002', 'date_quote': 'Date of service: 06/04/2026',
+                                       'quote': 'Impression: Disc protrusion.'}]}}]}
 
 
 def agent():

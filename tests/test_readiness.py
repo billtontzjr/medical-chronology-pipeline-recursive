@@ -196,8 +196,12 @@ def test_complete_pipeline_download_ocr_generate_export_upload_and_resume(tmp_pa
     p.dropbox_tool = tool
     class SyntheticOCR(OCRClient):
         async def batch_extract(self, paths, **kwargs):
+            text = ('=== SOURCE PDF PAGE 1 ===\nDate of service: 01/01/2026\n'
+                    'Facility: Clinic B\nProvider: John Beta, MD\nStudy: Lumbar MRI\n'
+                    'Impression: Synthetic result.' if paths[0].endswith('a.pdf') else
+                    '=== SOURCE PDF PAGE 1 ===\n01/01/2026\nAssessment: Synthetic pain. Plan: Follow up.')
             return [{'success': True, 'source_path': paths[0], 'file_name': paths[0].split('/')[-1],
-                     'text': '=== SOURCE PDF PAGE 1 ===\n01/01/2026\nAssessment: Synthetic pain. Plan: Follow up.',
+                     'text': text,
                      'page_count': 1, 'page_results': [{'page': 1, 'status': 'text'}]}]
     p.ocr_client = SyntheticOCR('synthetic-not-a-real-key')
     a = ChronologyAgent.__new__(ChronologyAgent); a.model = 'synthetic'; a.logger = p.logger
@@ -209,7 +213,10 @@ def test_complete_pipeline_download_ocr_generate_export_upload_and_resume(tmp_pa
             'entries': [{'record_type': 'clinical_care', 'source_ids': ['D001'],
                          'text': '01/01/2026. Clinic A. Jane Alpha, MD. Visit. Assessment: Synthetic pain. Plan: Follow up.'},
                         {'record_type': 'diagnostic_test', 'source_ids': ['D002'],
-                         'text': '01/01/2026. Clinic B. John Beta, MD. Imaging. Impression: Synthetic result.'}]})
+                         'diagnostic_result': {'date': '01/01/2026', 'facility': 'Clinic B',
+                             'provider': 'John Beta, MD', 'study': 'Lumbar MRI',
+                             'evidence': [{'source_id': 'D002', 'date_quote': 'Date of service: 01/01/2026',
+                                           'quote': 'Impression: Synthetic result.'}]}}]})
     a._call_api_with_retry = model
     a.extract_header = lambda *args: {'patient_name': 'SYNTHETIC', 'date_of_birth': '[See Records]', 'date_of_injury': '[See Records]'}
     a.generate_summary_and_gaps = lambda *args: {'summary_md': 'Synthetic summary.', 'gaps_md': 'Synthetic gaps.'}

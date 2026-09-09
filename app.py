@@ -195,11 +195,7 @@ def _render_source_review(pipeline, state, key_prefix):
     if st.button('Start refreshed run', key=f'refresh_{key_prefix}_{state.session_id}',
                  help='Creates a new case run using the saved source link and original model. Downloads and extracts fresh copies into a new session; preserves the old draft.'):
         try:
-            saved_pipeline = _pipeline_for_saved_run(pipeline, state.session_id)
-            refreshed = saved_pipeline.create_session(state.dropbox_link, state.patient_id)
-            # Pin the selected saved model before any generation takes place.
-            from src.session_model import save_model_config
-            save_model_config(saved_pipeline.store.extracted_dir(refreshed.session_id), saved_pipeline.chronology_agent.model)
+            refreshed = pipeline.refresh_session(state.session_id, model_candidates=MODEL_OPTIONS.values())
             st.session_state['active_session_id'] = refreshed.session_id
             st.rerun()
         except (ValueError, RuntimeError) as exc:

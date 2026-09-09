@@ -50,6 +50,7 @@ from .tools.dropbox_tool import DropboxTool
 from .output_safety import OUTPUT_ROOT, validate_destination
 from .session_lock import session_lock
 from .download_snapshot import download_snapshot
+from .session_model import saved_model, save_model_config
 
 
 DEFAULT_DESTINATION_PREFIX = OUTPUT_ROOT
@@ -132,8 +133,27 @@ class MedicalChronologyPipeline:
             destination_folder=destination,
         )
 
+    def refresh_session(self, session_id: str, *, model_candidates=()) -> SessionState:
+        """Create an isolated new run without changing the original case."""
+        with session_lock(self._lock_path(session_id)):
+            original = self.store.load(session_id)
+            model = saved_model(self.chronology_agent, self.store.extracted_dir(session_id),
+                                self.store.batches_dir(session_id), model_candidates, persist=False)
+            refreshed = self.create_session(original.dropbox_link, original.patient_id)
+            save_model_config(self.store.batches_dir(refreshed.session_id), model)
+            return refreshed
+
     def list_sessions(self) -> List[SessionState]:
         return self.store.list_sessions()
+
+    def _check_saved_model(self, session_id):
+        path = self.store.batches_dir(session_id) / 'run_model.json'
+        if path.exists():
+            model = saved_model(self.chronology_agent, self.store.extracted_dir(session_id),
+                                path.parent, (), persist=False)
+            if model != self.chronology_agent.model:
+                raise ValueError('The pipeline model differs from the saved run model. '
+                                 'Reload this run with its saved model before processing.')
 
     def load_session(self, session_id: str) -> SessionState:
         return self.store.load(session_id)
@@ -163,6 +183,7 @@ class MedicalChronologyPipeline:
     ) -> Dict:
         try:
             with session_lock(self._lock_path(session_id)):
+                self._check_saved_model(session_id)
                 return self._verify_session(session_id, progress_callback)
         except Exception as exc:
             return {'success': False, 'error': str(exc)}
@@ -236,6 +257,7 @@ class MedicalChronologyPipeline:
     ) -> Dict:
         try:
             with session_lock(self._lock_path(session_id)):
+                self._check_saved_model(session_id)
                 return await self._run_session(session_id, progress_callback)
         except Exception as exc:
             return {'status': 'failed', 'session_id': session_id, 'error': str(exc)}

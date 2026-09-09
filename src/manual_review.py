@@ -1,5 +1,6 @@
 """Separate unresolved source sections from the supported chronology draft."""
 import hashlib
+import copy
 import json
 import re
 from pathlib import Path
@@ -71,7 +72,17 @@ def parse_draft_response(raw, documents):
     retained_ids = [sid for sid in lookup if sid not in pending_ids]
     mapping = {sid: f'D{i:03d}' for i, sid in enumerate(retained_ids, 1)}
     retained_sources = [dict(s, id=mapping[s['id']]) for s in data['sources'] if s['id'] in mapping]
-    retained_entries = [dict(e, source_ids=[mapping[sid] for sid in e['source_ids']]) for e in kept_entries]
+    retained_entries = []
+    for entry in kept_entries:
+        retained = copy.deepcopy(entry)
+        retained['source_ids'] = [mapping[sid] for sid in entry['source_ids']]
+        result = retained.get('diagnostic_result')
+        if isinstance(result, dict) and isinstance(result.get('evidence'), list):
+            for item in result['evidence']:
+                if not isinstance(item, dict) or item.get('source_id') not in entry['source_ids']:
+                    raise ScopeReviewRequired('Diagnostic evidence references an unrelated source.')
+                item['source_id'] = mapping[item['source_id']]
+        retained_entries.append(retained)
     text, exclusions = parse_scoped_response(json.dumps({'sources': retained_sources, 'entries': retained_entries}),
                                              [lookup[sid] for sid in retained_ids])
     return text, exclusions, reviews
