@@ -7,8 +7,8 @@ from .deposition_evidence import atomic_json
 from .session_lock import session_lock
 
 
-GENERATION_VERSION = 'source-bound-diagnostics-v4'
-LEGACY_VERSIONS = ('same-day-care-v3',)
+GENERATION_VERSION = 'page-bound-diagnostics-v5'
+LEGACY_VERSIONS = ('source-bound-diagnostics-v4', 'same-day-care-v3')
 
 
 def batch_signature(batches, exclusions, model, *, version=GENERATION_VERSION):
@@ -50,6 +50,16 @@ def saved_model(agent, input_dir, batches_dir, candidates, *, persist=True):
         matches = {model for model in choices if isinstance(model, str) and model
                    and any(batch_signature(batches, exclusions, model, version=version) == manifest.get('signature')
                            for version in (GENERATION_VERSION,) + LEGACY_VERSIONS)}
+        legacy_reader = getattr(agent, '_read_legacy_extracted_files', None)
+        if not matches and callable(legacy_reader):
+            # Only model recovery may reproduce the whitespace-flattened layout.
+            # Generation always fingerprints the new page-preserving documents.
+            legacy_documents = legacy_reader(str(input_dir))
+            legacy_batches = agent._plan_batches(legacy_documents)
+            legacy_exclusions = getattr(agent, '_source_exclusions', [])
+            matches = {model for model in choices if isinstance(model, str) and model
+                       and any(batch_signature(legacy_batches, legacy_exclusions, model, version=version)
+                               == manifest.get('signature') for version in LEGACY_VERSIONS)}
         if len(matches) != 1:
             raise ValueError('The saved model and source fingerprint could not be confirmed. '
                              'Existing batches were preserved; review before resuming.')

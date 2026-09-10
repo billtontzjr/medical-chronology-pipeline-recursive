@@ -177,7 +177,7 @@ def parse_scoped_response(raw, documents):
     if set(dispositions) != set(lookup):
         raise ScopeFormatError('Not every document was screened; no batch saved.', code='missing_source')
     kept, referenced = [], set()
-    for entry in data['entries']:
+    for entry_number, entry in enumerate(data['entries'], 1):
         if not isinstance(entry, dict):
             raise ScopeFormatError('Invalid chronology entry response.', code='invalid_entry')
         category, ids, text = entry.get('record_type'), entry.get('source_ids'), entry.get('text')
@@ -190,7 +190,8 @@ def parse_scoped_response(raw, documents):
                 text = render_diagnostic(entry, evidence_lookup)
             except DiagnosticEvidenceError as exc:
                 raise ScopeReviewRequired(str(exc), code='diagnostic_source_review',
-                                          details=[{'source_ids': ids}]) from exc
+                                          details=[{'entry_number': entry_number, 'source_ids': ids,
+                                                    'check': exc.code, 'failed_checks': exc.checks}]) from exc
         forced_exclusion = excluded_entry_category(text)
         if category in EXCLUDED or forced_exclusion:
             for sid in ids:

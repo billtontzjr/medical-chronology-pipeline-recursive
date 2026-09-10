@@ -21,6 +21,8 @@ from .chronology_scope import (screen_source, SCOPE_RULES,
                                excluded_entry_category, ScopeReviewRequired)
 from .encounters import clean_labels, consolidate
 from .word_export import chronology_docx
+from .source_pages import chunk_source, source_prompt_text
+from .diagnostic_dates import full_dates
 
 try:
     from anthropic import Anthropic, APIError, APIStatusError
@@ -360,8 +362,12 @@ class ChronologyAgent:
         return '\n\n'.join(sorted_entries)
     
     def _chunk_large_document(self, filename: str, content: str, max_chunk_chars: int = 40000) -> List[Dict[str, str]]:
+        """Preserve complete source pages and mark any unavoidable page fragments."""
+        return chunk_source(filename, content, max_chunk_chars)
+
+    def _legacy_chunk_large_document(self, filename: str, content: str, max_chunk_chars: int = 40000) -> List[Dict[str, str]]:
         """
-        Split a large document into smaller chunks.
+        Reproduce the old layout ONLY to verify legacy saved-model fingerprints.
 
         Each chunk after the first is prefixed with the document's opening text
         as reference context, because facility/provider/patient identifiers
@@ -429,7 +435,14 @@ class ChronologyAgent:
         self.logger.info(f"Split {filename} into {len(chunks)} chunks (header context carried into continuation chunks)")
         return chunks
 
+    def _read_legacy_extracted_files(self, input_dir: str) -> List[Dict[str, str]]:
+        """Read-only compatibility path; never used for new generation."""
+        return self._load_extracted_files(input_dir, legacy=True)
+
     def _read_extracted_files(self, input_dir: str) -> List[Dict[str, str]]:
+        return self._load_extracted_files(input_dir)
+
+    def _load_extracted_files(self, input_dir: str, *, legacy=False) -> List[Dict[str, str]]:
         """Read all extracted text files from the input directory and chunk large ones."""
         input_path = Path(input_dir)
         documents = []
@@ -448,7 +461,8 @@ class ChronologyAgent:
                     deposition = prepare_document(display_name, content)
                     # Isolate testimony BEFORE chunking so a prefatory AI summary
                     # cannot be carried into every continuation chunk as context.
-                    chunks = [deposition] if deposition else self._chunk_large_document(
+                    chunker = self._legacy_chunk_large_document if legacy else self._chunk_large_document
+                    chunks = [deposition] if deposition else chunker(
                         display_name, content, max_chunk_chars=20000
                     )
                     for chunk in chunks:
@@ -480,24 +494,13 @@ class ChronologyAgent:
             Dictionary mapping date strings (MM/DD/YYYY) to list of relevant documents
         """
         date_map = {}
-        date_pattern = r'(\d{1,2})/(\d{1,2})/(\d{4})'
         
         for doc in documents:
             if doc.get('document_type') == 'deposition':
                 continue  # Recalled dates are not independently documented visits.
-            # Find all dates in the document
-            matches = re.finditer(date_pattern, doc['content'])
-            found_dates = set()
-            
-            for match in matches:
-                try:
-                    month, day, year = match.groups()
-                    # Normalize date format to MM/DD/YYYY
-                    date_obj = datetime(int(year), int(month), int(day))
-                    date_str = date_obj.strftime('%m/%d/%Y')
-                    found_dates.add(date_str)
-                except ValueError:
-                    continue
+            # Match explicit full-year dates, including ISO and month names.
+            # Attribution-only carried context cannot supply encounter dates.
+            found_dates = full_dates(doc['content'])
             
             # Add doc to map for each found date
             for date_str in found_dates:
@@ -519,7 +522,7 @@ class ChronologyAgent:
         # Preserve all source text. Bound each request by grouping whole chunks upstream.
         source_text = ""
         for doc in relevant_docs:
-            source_text += f"=== DOCUMENT: {doc['filename']} ===\n{doc['content']}\n\n"
+            source_text += f"=== DOCUMENT: {doc['filename']} ===\n{source_prompt_text(doc)}\n\n"
 
         prompt = f"""You are a medical record auditor. Verify these chronology entries against the provided source documents.
 
@@ -662,11 +665,12 @@ If no issues found in any entries, output "No issues found."
                     # claim unsupported across the entire file; retain them for human reconciliation.
                     groups, group, size = [], [], 0
                     for doc in relevant_docs:
-                        if group and size + len(doc['content']) > 60000:
+                        doc_size = len(source_prompt_text(doc))
+                        if group and size + doc_size > 60000:
                             groups.append(group)
                             group, size = [], 0
                         group.append(doc)
-                        size += len(doc['content'])
+                        size += doc_size
                     if group:
                         groups.append(group)
                     complete = True
@@ -749,10 +753,9 @@ If no issues found in any entries, output "No issues found."
             return summarize(documents[0], self._call_api_with_retry)[0], []
 
         # Build documents text for this batch
-        documents_text = "\n\n".join([
-            f"=== SOURCE D{i:03d}: {doc['filename']} ===\n{doc['content']}"
-            for i, doc in enumerate(documents, 1)
-        ])
+        sources = [f"=== SOURCE D{i:03d}: {doc['filename']} ===\n{source_prompt_text(doc)}"
+                   for i, doc in enumerate(documents, 1)]
+        documents_text = "\n\n".join(sources)
 
         # Condensed rules for batch processing
         rules = """Create medical chronology entries following these rules:
@@ -879,6 +882,11 @@ Diagnostic header values and quotes must be present in the cited source.
 Use "Facility not documented" or "Provider not documented" only if genuinely absent.
 Each result quote, study, and service/exam date must align on the same source page;
 date_quote includes the date label, not a birth, injury or historical date.
+Use an exact collection/exam field such as Collected On or DATE/TIME when present.
+A two-digit year needs a corroborating four-digit service/exam date on that same
+page; do not infer its century from the current year, patient age, or other pages.
+Preserve the full date field even if its label and value occupy consecutive lines.
+Report/result/signature dates are not substitutes for a documented study date.
 Preserve result wording and punctuation (OCR whitespace may be collapsed).
 Do not add diagnostic text, assessment, plan, clinical indication or other fields.
 If the diagnostic evidence is missing, spans ambiguous pages, or cannot be tied
@@ -912,7 +920,7 @@ review_required and give a specific reason rather than silently dropping medical
                     current, current_tokens = [], 0
                 batches.append([doc])
                 continue
-            doc_tokens = len(doc["content"]) // 4  # ~4 chars/token
+            doc_tokens = len(source_prompt_text(doc)) // 4  # ~4 chars/token
             if current and (current_tokens + doc_tokens) > MAX_BATCH_TOKENS:
                 batches.append(current)
                 current = [doc]

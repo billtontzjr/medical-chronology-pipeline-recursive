@@ -11,7 +11,7 @@ from .manual_review import parse_draft_response
 def screen_batch(prompt, documents, call_api, *, model=None, checkpoint=None, progress=None, allow_manual_review=False):
     path = Path(checkpoint) if checkpoint else None
     progress = progress or (lambda _: None)
-    signature = hashlib.sha256(json.dumps({'protocol': 1, 'prompt': prompt,
+    signature = hashlib.sha256(json.dumps({'protocol': 2, 'prompt': prompt,
         'documents': documents, 'model': model}, sort_keys=True).encode()).hexdigest()
     state = {'signature': signature, 'model': model, 'status': 'pending', 'attempts': [],
              'sources': [{'id': f'D{i:03d}', 'filename': doc['filename']}
