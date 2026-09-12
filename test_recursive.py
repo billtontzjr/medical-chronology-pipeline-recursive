@@ -1,12 +1,13 @@
 """Test the recursive shared link feature locally."""
 
-import sys
 import os
 
-# Add the src directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+import pytest
+from src.tools.dropbox_tool import DropboxTool
 
-from tools.dropbox_tool import DropboxTool
+# This interactive integration helper remains executable directly, but ordinary
+# test discovery must never prompt for a real case or download patient records.
+pytestmark = pytest.mark.skip(reason="Manual Dropbox integration helper; run python test_recursive.py explicitly.")
 
 def test_recursive_download():
     """Test downloading from a shared link with subfolders."""

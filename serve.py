@@ -7,10 +7,12 @@ import secrets
 import subprocess
 import sys
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlencode
+from html import escape
 
 import aiohttp
 from aiohttp import web
+from src.session_state import validate_session_id
 from src.access_control import configured_password, password_matches, attempt_allowed, SESSION_SECONDS
 
 COOKIE = '__Host-chronology_session'
@@ -25,6 +27,24 @@ LOGIN = '''<!doctype html><html><head><meta name="viewport" content="width=devic
 <form method="post" action="/login"><label>Team password<br>
 <input name="password" type="password" autocomplete="current-password" required style="width:100%;padding:12px;box-sizing:border-box"></label>
 <button style="margin-top:16px;padding:12px" type="submit">Sign in</button></form></body></html>'''
+
+
+def return_session_id(value):
+    """Carry only a validated case ID through login, never a redirect URL."""
+    try:
+        return validate_session_id(value)
+    except (ValueError, TypeError):
+        return ''
+
+
+def login_page(session_id='', *, rejected=False):
+    body = LOGIN
+    if session_id:
+        hidden = '<input type="hidden" name="session_id" value="' + escape(session_id, quote=True) + '">'
+        body = body.replace('</form>', hidden + '</form>')
+    if rejected:
+        body = body.replace('Sign in with your team password.', 'Password not accepted. Try again.')
+    return body
 
 
 def sign_token(password, secret, now=None):
@@ -84,9 +104,11 @@ def create_app(upstream='http://127.0.0.1:8502', secret=None):
             if not attempt_allowed():
                 return web.Response(text='Too many attempts. Wait one minute.', status=429, headers=headers)
             form = await request.post()
+            session_id = return_session_id(form.get('session_id', ''))
             if not password_matches(str(form.get('password', '')), password):
-                return web.Response(text=LOGIN.replace('Sign in with your team password.', 'Password not accepted. Try again.'), content_type='text/html', status=401, headers=headers)
-            response = web.HTTPSeeOther('/', headers=headers)
+                return web.Response(text=login_page(session_id, rejected=True), content_type='text/html', status=401, headers=headers)
+            target = '/?' + urlencode({'session_id': session_id}) if session_id else '/'
+            response = web.HTTPSeeOther(target, headers=headers)
             response.set_cookie(COOKIE, sign_token(password, secret), secure=True, httponly=True,
                                 samesite='Strict', max_age=SESSION_SECONDS, path='/')
             raise response
@@ -99,11 +121,13 @@ def create_app(upstream='http://127.0.0.1:8502', secret=None):
             response.del_cookie(COOKIE, path='/', secure=True, httponly=True, samesite='Strict')
             raise response
         if request.path == '/login':
-            return web.Response(text=LOGIN, content_type='text/html', headers=headers)
+            return web.Response(text=login_page(return_session_id(request.query.get('session_id', ''))), content_type='text/html', headers=headers)
         token = request.cookies.get(COOKIE, '')
         if not valid(token):
             if request.path == '/':
-                raise web.HTTPSeeOther('/login', headers=headers)
+                session_id = return_session_id(request.query.get('session_id', ''))
+                target = '/login?' + urlencode({'session_id': session_id}) if session_id else '/login'
+                raise web.HTTPSeeOther(target, headers=headers)
             return web.Response(text='Sign in to access this resource.', status=401, headers=headers)
         forwarded = {k: v for k, v in request.headers.items()
                      if k.lower() not in HOP and k.lower() not in ('x-chronology-gateway',)}
