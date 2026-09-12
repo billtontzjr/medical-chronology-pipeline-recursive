@@ -125,9 +125,9 @@ def render_phase_tracker(state: SessionState, container) -> None:
 
 def session_badge(status: str, manual_review_count: int = 0) -> str:
     if status == STATUS_COMPLETE and manual_review_count:
-        return f"🟠 {DRAFT_LABEL} ({manual_review_count} source sections)"
+        return f"🟠 {DRAFT_LABEL} ({manual_review_count} documents need review)"
     if manual_review_count and status in (STATUS_FAILED, 'pending'):
-        return f"🟠 Needs review ({manual_review_count} documents)"
+        return f"🟠 Needs review ({manual_review_count} {'document' if manual_review_count == 1 else 'documents'})"
     icons = {
         "pending": "⚪",
         STATUS_COMPLETE: "🟢",

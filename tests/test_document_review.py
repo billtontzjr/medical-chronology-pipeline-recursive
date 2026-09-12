@@ -183,6 +183,37 @@ def test_ocr_changed_evidence_reopens_review(tmp_path):
         deferred_sources(store.input_dir(state.session_id), store.extracted_dir(state.session_id))
 
 
+def test_review_retry_does_not_reextract_other_legacy_files(tmp_path):
+    from types import SimpleNamespace
+    store, state, _ = ocr_fixture(tmp_path)
+    other = store.input_dir(state.session_id) / 'Legacy.pdf'
+    other.write_bytes(b'other synthetic PDF')
+    extracted = store.extracted_dir(state.session_id)
+    (extracted / 'Legacy.txt').write_text('Preserved legacy OCR')
+    state.phases['ocr'].data['coverage'] = collect_coverage(store.input_dir(state.session_id), extracted)
+    store.save(state)
+    item = next(i for i in ocr_items(store, state) if i['report']['source_file'] == 'Poor.pdf')
+    save_ocr_decision(store, state.session_id, 'Poor.pdf', fingerprint=item['fingerprint'],
+        action='retry_requested', reviewer='Reviewer', reason='Retry selected file')
+    calls = []
+    async def extract(paths, **kwargs):
+        calls.extend(paths)
+        return [{'success': True, 'page_count': 1, 'page_results': [{'page': 1, 'status': 'text'}]}]
+    def save(*args, **kwargs):
+        (extracted / 'Poor.txt').write_text('Recovered selected text')
+    pipeline = MedicalChronologyPipeline.__new__(MedicalChronologyPipeline)
+    pipeline.store = store
+    pipeline.logger = logging.getLogger('selected-retry')
+    pipeline.ocr_client = SimpleNamespace(batch_extract=extract, save_extracted_text=save)
+    with pytest.raises(RuntimeError, match='OCR has failed'):
+        asyncio.run(pipeline._phase_ocr(store.load(state.session_id), lambda _: None))
+    assert [Path(p).name for p in calls] == ['Poor.pdf']
+    assert (extracted / 'Legacy.txt').read_text() == 'Preserved legacy OCR'
+    assert store.load(state.session_id).phases['ocr'].data['coverage']['files_needing_review'] == 1
+    asyncio.run(pipeline._phase_ocr(store.load(state.session_id), lambda _: None))
+    assert len(calls) == 1  # No unchanged retry on a later resume.
+
+
 def test_evidence_line_input():
     assert parse_ranges('27; 84-85') == [[27, 27], [84, 85]]
     with pytest.raises(ValueError):
