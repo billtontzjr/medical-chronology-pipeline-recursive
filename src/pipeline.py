@@ -51,6 +51,8 @@ from .output_safety import OUTPUT_ROOT, validate_destination
 from .session_lock import session_lock
 from .download_snapshot import download_snapshot
 from .session_model import saved_model, save_model_config
+from .deposition_review import save_decision, apply_review_updates
+from .ocr_review import save_ocr_decision, apply_ocr_updates, deferred_sources, blocking_coverage
 
 
 DEFAULT_DESTINATION_PREFIX = OUTPUT_ROOT
@@ -110,6 +112,14 @@ class MedicalChronologyPipeline:
             if target.exists():
                 raise RuntimeError('An archived case already has this identifier.')
             source.rename(target)
+
+    def review_deposition(self, session_id, batch, **decision):
+        with session_lock(self._lock_path(session_id)):
+            return save_decision(self.store, session_id, batch, **decision)
+
+    def review_ocr(self, session_id, source_file, **decision):
+        with session_lock(self._lock_path(session_id)):
+            return save_ocr_decision(self.store, session_id, source_file, **decision)
 
     def _default_destination(self, session_id: str) -> str:
         return f"{DEFAULT_DESTINATION_PREFIX}/{session_id}"
@@ -183,6 +193,8 @@ class MedicalChronologyPipeline:
     ) -> Dict:
         try:
             with session_lock(self._lock_path(session_id)):
+                apply_ocr_updates(self.store, session_id)
+                apply_review_updates(self.store, session_id)
                 self._check_saved_model(session_id)
                 return self._verify_session(session_id, progress_callback)
         except Exception as exc:
@@ -300,8 +312,7 @@ class MedicalChronologyPipeline:
             self._check_pause(session_id)
             if state.phases[PHASE_GENERATE].status == STATUS_COMPLETE:
                 prior_coverage = collect_coverage(self.store.input_dir(session_id), self.store.extracted_dir(session_id))
-                if (prior_coverage['technical_failures'] or
-                        any(r.get('coverage_status') == 'unknown_legacy' for r in prior_coverage['files'])):
+                if blocking_coverage(prior_coverage, deferred_sources(self.store.input_dir(session_id), self.store.extracted_dir(session_id))):
                     raise RuntimeError('The saved extraction cannot be reconciled with this generated draft. Start a refreshed run; the existing draft is preserved.')
 
             if state.phases[PHASE_OCR].status != STATUS_COMPLETE:
@@ -317,7 +328,7 @@ class MedicalChronologyPipeline:
             self.store.update_phase_data(state, PHASE_OCR, {'coverage': coverage})
             if coverage['files_needing_review']:
                 cb(f"⚠️ OCR coverage: {coverage['files_needing_review']} file(s) need page review; see the coverage report")
-            if coverage['technical_failures'] or any(r.get('coverage_status') == 'unknown_legacy' for r in coverage['files']):
+            if blocking_coverage(coverage, deferred_sources(self.store.input_dir(session_id), self.store.extracted_dir(session_id))):
                 self.store.mark_phase(state, PHASE_OCR, STATUS_FAILED)
                 raise RuntimeError("OCR has failed or missing pages. Resume to retry extraction before generating a chronology.")
 
@@ -446,7 +457,10 @@ class MedicalChronologyPipeline:
 
         # Resume: skip PDFs whose .txt already exists and is non-empty
         pending: List[Path] = []
+        deferred = deferred_sources(input_dir, extracted_dir)
         for p in pdf_paths:
+            if str(p.relative_to(input_dir)) in deferred:
+                continue
             txt = extracted_dir / p.relative_to(input_dir).with_suffix(".txt")
             sidecar = coverage_path(p, input_dir, extracted_dir)
             try:
@@ -491,10 +505,10 @@ class MedicalChronologyPipeline:
 
         coverage = collect_coverage(input_dir, extracted_dir)
         self.store.update_phase_data(state, PHASE_OCR, {'coverage': coverage})
-        if coverage['technical_failures'] or any(r.get('coverage_status') == 'unknown_legacy' for r in coverage['files']):
+        if blocking_coverage(coverage, deferred):
             raise RuntimeError("OCR has failed or missing pages. Completed files are saved; resume to retry failed files.")
         # Verify at least something came out
-        if not list(extracted_dir.rglob("*.txt")):
+        if not list(extracted_dir.rglob("*.txt")) and not deferred:
             raise RuntimeError("No text could be extracted from PDFs")
 
     async def _phase_generate(

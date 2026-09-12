@@ -200,6 +200,7 @@ def resolve_statements(data, index, allowed=None, available=None, allow_empty=Fa
 def validate_identity(data, index):
     if not isinstance(data, dict) or data.get('review_required'):
         raise DepositionReviewRequired('Deposition identity/date needs review.')
+    evidence = {}
     for field in ('date', 'witness', 'credentials'):
         if field == 'credentials' and not data.get(field):
             continue
@@ -207,20 +208,25 @@ def validate_identity(data, index):
             quotes, locations = index.resolve(data[field+'_refs'], (0, 20000))
             data[field+'_quote'] = '\n'.join(quotes)
             data[field+'_locations'] = locations
+        else:
+            quotes = [data.get(field+'_quote')]
+        # Multiple cited ranges need not be adjacent in the source. Validate
+        # each exact passage, not their concatenation as a fabricated quote.
+        for quote in quotes:
+            require_quote(quote, index.text[:20000])
+        evidence[field] = quotes
     date, witness, credentials = (data.get(k) for k in ('date', 'witness', 'credentials'))
     if not isinstance(date, str) or not re.fullmatch(r'\d{2}/\d{2}/\d{4}', date):
         raise DepositionReviewRequired('Deposition session date needs review; no entry saved.')
-    require_quote(data.get('date_quote'), index.text[:20000])
-    if date not in dates_in_text(data['date_quote']):
+    if not any(date in dates_in_text(quote) for quote in evidence['date']):
         raise DepositionReviewRequired('Deposition date is not supported by its transcript quote.')
-    require_quote(data.get('witness_quote'), index.text[:20000])
-    if not isinstance(witness, str) or not witness.strip() or normalize(witness) not in normalize(data['witness_quote']):
+    if (not isinstance(witness, str) or not witness.strip()
+            or not any(normalize(witness) in normalize(quote) for quote in evidence['witness'])):
         raise DepositionReviewRequired('Deposed witness name needs review.')
     if not isinstance(credentials, str):
         raise DepositionReviewRequired('Witness credentials need review.')
     if credentials:
-        require_quote(data.get('credentials_quote'), index.text[:20000])
-        if normalize(credentials) not in normalize(data['credentials_quote']):
+        if not any(normalize(credentials) in normalize(quote) for quote in evidence['credentials']):
             raise DepositionReviewRequired('Witness credentials are not supported by the transcript quote.')
     return data
 
@@ -241,10 +247,16 @@ def validate_support_review(data, count):
     return reviews
 
 
-def _summarize(document, call_api, checkpoint_path, model, progress_callback):
+def _summarize(document, call_api, checkpoint_path, model, progress_callback, identity_review=None):
     transcript = document['content']
     index = TranscriptIndex(transcript)
     runner = StageRunner(document, model, call_api, checkpoint_path, progress_callback)
+    if identity_review:
+        checked = validate_identity(dict(identity_review['identity']), index)
+        runner.state['stages']['identity'] = checked
+        runner.state['human_identity_review'] = identity_review
+        runner.state.pop('blocked_stage', None)
+        runner.save()
     metadata = runner.ask('identity',
         "Extract the deposition's actual session date (not injury, printing, certification, "
         "or a previous deposition date), deposed witness's full name and credentials "
@@ -339,12 +351,14 @@ def _summarize(document, call_api, checkpoint_path, model, progress_callback):
                 'excluded_prefix_chars': document['excluded_prefix_chars'],
                 'transcript_chars_read': len(transcript), 'statements': statements,
                 'support_review': reviews}
+    if identity_review:
+        evidence['human_identity_review'] = identity_review
     return entry, evidence
 
 
-def summarize(document, call_api, *, checkpoint_path=None, model=None, progress_callback=None):
+def summarize(document, call_api, *, checkpoint_path=None, model=None, progress_callback=None, identity_review=None):
     try:
-        return _summarize(document, call_api, checkpoint_path, model, progress_callback)
+        return _summarize(document, call_api, checkpoint_path, model, progress_callback, identity_review)
     except EvidenceError as exc:
         if isinstance(exc, DepositionReviewRequired):
             raise

@@ -10,6 +10,8 @@ from datetime import datetime
 import logging
 import hashlib
 from .deposition_evidence import atomic_json
+from .deposition_review import decision_for, deferred_review
+from .ocr_review import deferred_sources
 
 from .deposition import (prepare_document, source_chunks, cover_dates, summarize,
                          DepositionReviewRequired)
@@ -447,8 +449,15 @@ class ChronologyAgent:
         input_path = Path(input_dir)
         documents = []
         self._source_exclusions = []
+        deferred = deferred_sources(input_path.parent / 'input', input_path)
+        withheld = {str(Path(name).with_suffix('.txt')) for name in deferred}
+        for name, decision in deferred.items():
+            self._source_exclusions.append({'source_file': name, 'category': 'manual_review',
+                'reason': decision['reason'], 'stage': 'human_ocr_deferral'})
 
         for txt_file in sorted(input_path.rglob('*.txt')):
+            if str(txt_file.relative_to(input_path)) in withheld:
+                continue
             try:
                 with open(txt_file, 'r', encoding='utf-8') as f:
                     content = f.read()
@@ -997,6 +1006,22 @@ review_required and give a specific reason rather than silently dropping medical
         for batch_num, batch in enumerate(batches, 1):
             batch_file = batches_path / f"batch_{batch_num:03d}.md"
             scope_file = batch_file.with_suffix('.scope.json')
+            decision = None
+            if batch[0].get('document_type') == 'deposition':
+                work_path = batch_file.with_suffix('.deposition-work.json')
+                decision = decision_for(batch[0], getattr(self, 'model', None), work_path)
+                if decision and decision['status'] == 'deferred':
+                    atomic_json(scope_file, {'empty_complete': True, 'exclusions': [],
+                        'manual_reviews': [deferred_review(batch[0], decision)]})
+                    batch_file.write_text('')
+                    completed += 1
+                    if progress_callback:
+                        progress_callback(f'Needs review: {batch[0]["filename"]} deferred; continuing other documents.')
+                    continue
+                if work_path.exists():
+                    blocked = json.loads(work_path.read_text()).get('blocked_stage')
+                    if blocked and not (blocked == 'identity' and decision and decision['status'] == 'approved_identity'):
+                        raise DepositionReviewRequired(f'Needs review: {batch[0]["filename"]}. Open Review documents to review the evidence or defer this document and continue.')
             empty_complete = (batch_file.exists() and scope_file.exists()
                               and json.loads(scope_file.read_text()).get('empty_complete') is True)
             deposition_evidence = batch_file.with_suffix('.deposition.json')
@@ -1025,7 +1050,8 @@ review_required and give a specific reason rather than silently dropping medical
             if len(batch) == 1 and batch[0].get('document_type') == 'deposition':
                 batch_md, evidence = summarize(batch[0], self._call_api_with_retry,
                     checkpoint_path=batch_file.with_suffix('.deposition-work.json'),
-                    model=getattr(self, 'model', None), progress_callback=progress_callback)
+                    model=getattr(self, 'model', None), progress_callback=progress_callback,
+                    identity_review=decision)
                 evidence_path = batch_file.with_suffix('.deposition.json')
                 evidence_tmp = evidence_path.with_suffix('.json.tmp')
                 evidence_tmp.write_text(json.dumps(evidence, indent=2), encoding='utf-8')

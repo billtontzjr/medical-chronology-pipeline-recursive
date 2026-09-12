@@ -4,7 +4,7 @@ import stat
 
 import pytest
 
-from src.deposition import DepositionReviewRequired, prepare_document, summarize
+from src.deposition import DepositionReviewRequired, prepare_document, summarize, validate_identity
 from src.deposition_evidence import EvidenceError, TranscriptIndex
 
 
@@ -34,6 +34,37 @@ def test_server_retrieves_numbered_quote_without_model_copying():
     assert TEXT[location['start_char']:location['end_char']].strip() == statement['evidence'][0]
     assert evidence['protocol_version'] == 2
     assert evidence['support_review'] == GOOD['reviews']
+
+
+def test_identity_accepts_separate_exact_passages_and_keeps_locations():
+    text = TEXT + '\nSESSION DATE: July 16, 2026\nWITNESS: Jamie Example\n'
+    index = TranscriptIndex(text)
+    n = len(index.lines)
+    data = {**IDENTITY, 'date_refs': [[3, 3], [n-1, n-1]],
+            'witness_refs': [[2, 2], [n, n]]}
+    result = validate_identity(data, index)
+    assert result['date'] == '07/16/2026'
+    assert len(result['date_locations']) == len(result['witness_locations']) == 2
+    for field in ('date', 'witness'):
+        for location in result[field+'_locations']:
+            assert text[location['start_char']:location['end_char']].strip() in result[field+'_quote']
+
+
+@pytest.mark.parametrize('field,value,refs,extra', [
+    ('date', '07/17/2026', [[3, 3]], ''),
+    ('witness', 'Other Person', [[2, 2]], ''),
+    ('witness', 'Jamie Example', [[1, 1], [3, 3]], 'Jamie\nUnrelated line\nExample\n'),
+    ('credentials', 'MD', [[2, 2]], ''),
+])
+def test_identity_requires_value_in_a_cited_passage(field, value, refs, extra):
+    text = extra or TEXT
+    data = {**IDENTITY, field: value, field+'_refs': refs}
+    if extra:
+        # Two unrelated ranges must not be stitched into a supported full name.
+        text += 'DATE: July 16, 2026\n'
+        data['date_refs'] = [[4, 4]]
+    with pytest.raises(DepositionReviewRequired):
+        validate_identity(data, TranscriptIndex(text))
 
 
 @pytest.mark.parametrize('refs', [[], [[0, 4]], [[4, 999]], [[5, 4]], [['4', 5]], [[True, 5]], [[4]], None])
