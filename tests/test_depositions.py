@@ -62,6 +62,15 @@ def test_standalone_with_nondeposition_filename_and_clinical_reference():
     assert prepare_document('Office.txt', '04/01/2026. The patient discussed a deposition. Plan: Therapy.') is None
 
 
+@pytest.mark.parametrize('filename', ['Deposition/Transcript/Office.txt', r'Deposition\Transcript\Office.txt'])
+def test_parent_folder_does_not_turn_exhibit_into_transcript(filename):
+    assert prepare_document(filename, 'Office visit. Assessment: Back pain.') is None
+    assert prepare_document(filename, transcript())['document_type'] == 'deposition'
+    for text in ('Deposition Summary\nWitness recalled pain.', 'DEPOSITION OF Jamie Example\n[Unreadable]'):
+        with pytest.raises(DepositionReviewRequired):
+            prepare_document(filename, text)
+
+
 @pytest.mark.parametrize('text', ['Deposition Summary\nWitness had surgery.',
     'Deposition Summary\nNo validated boundary\n' + transcript().replace('IN THE CIRCUIT COURT\nDEPOSITION OF Jamie Example\n', 'deposition\n')])
 def test_summary_only_or_unclear_boundary_requires_review(text):
