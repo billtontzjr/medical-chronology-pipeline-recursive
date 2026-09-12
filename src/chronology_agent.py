@@ -1037,7 +1037,11 @@ review_required and give a specific reason rather than silently dropping medical
                         progress_callback(f'Needs review: {batch[0]["filename"]} deferred; continuing other documents.')
                     continue
                 if work_path.exists():
-                    blocked = json.loads(work_path.read_text()).get('blocked_stage')
+                    from .deposition_synthesis import recoverable_aggregation_block
+                    work = json.loads(work_path.read_text())
+                    blocked = work.get('blocked_stage')
+                    if recoverable_aggregation_block(work):
+                        blocked = None
                     if blocked and not (blocked == 'identity' and decision and decision['status'] == 'approved_identity'):
                         raise DepositionReviewRequired(f'Needs review: {batch[0]["filename"]}. Open Review documents to review the evidence or defer this document and continue.')
             empty_complete = (batch_file.exists() and scope_file.exists()
