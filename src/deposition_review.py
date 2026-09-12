@@ -59,7 +59,7 @@ def review_items(input_dir, batches_dir):
     for path in sorted(Path(batches_dir).glob('batch_*.deposition-work.json')):
         work = json.loads(path.read_text())
         decision_path = path.with_name(path.name.split('.')[0] + '.deposition-review.json')
-        if work.get('blocked_stage') or decision_path.exists():
+        if work.get('blocked_stage') or work.get('response_error') or decision_path.exists():
             items.append(load_item(input_dir, batches_dir, path.name.split('.')[0]))
     return items
 

@@ -6,6 +6,7 @@ from pathlib import Path
 from .chronology_scope import ScopeFormatError, ScopeReviewRequired, parse_scoped_response
 from .deposition_evidence import atomic_json
 from .manual_review import parse_draft_response
+from .response_recovery import capture_responses
 
 
 def screen_batch(prompt, documents, call_api, *, model=None, checkpoint=None, progress=None, allow_manual_review=False):
@@ -38,7 +39,13 @@ def screen_batch(prompt, documents, call_api, *, model=None, checkpoint=None, pr
             raw = attempt['response']
         else:
             progress(f'↳ Source screening: attempt {index + 1}/2')
-            raw = call_api(prompt + feedback, max_tokens=16000)
+            def retain_response(details):
+                state.setdefault('response_diagnostics', []).append({'attempt': index + 1, **details})
+                save()
+                if details['retry_with_larger_budget']:
+                    progress('↳ Source screening reached the response limit; retrying once with more output space')
+            with capture_responses(retain_response):
+                raw = call_api(prompt + feedback, max_tokens=16000)
             attempt = {'response': raw}
             state['attempts'].append(attempt)
             save()

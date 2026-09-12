@@ -13,7 +13,7 @@ def review_count(store, state):
     sources = {str(Path(x['report']['source_file']).with_suffix('')) for x in ocr_items(store, state)}
     for path in store.batches_dir(state.session_id).glob('batch_*.deposition-work.json'):
         work = json.loads(path.read_text())
-        if work.get('blocked_stage'):
+        if work.get('blocked_stage') or work.get('response_error'):
             sources.add(str(Path(work['source_file']).with_suffix('')))
     sources.update(str(Path(x['source_file']).with_suffix('')) for x in collect_manual_reviews(store.batches_dir(state.session_id)))
     return len(sources) if sources else state.phases['header'].data.get('manual_review_count', 0)
@@ -47,11 +47,14 @@ def render_review_panel(pipeline, state, key_prefix, resume):
     for item in items:
         decision = item['decision'] or {}
         blocked = item['work'].get('blocked_stage')
-        if not blocked and decision.get('status') != 'deferred':
+        response_error = item['work'].get('response_error')
+        if not blocked and not response_error and decision.get('status') != 'deferred':
             continue
         key = panel_key + '_' + item['batch']
         with st.expander('Deposition review: ' + item['document']['filename'], expanded=True):
-            st.write('Review needed: ' + ('Witness identity and deposition date' if blocked == 'identity' else str(blocked or 'Deferred document')))
+            st.write('Review needed: ' + ('Witness identity and deposition date' if blocked == 'identity' else str(blocked or (response_error or {}).get('stage') or 'Deferred document')))
+            if response_error:
+                st.info(response_error['error'])
             if decision:
                 st.info(f"Last decision: {decision['status'].replace('_', ' ')} by {decision['reviewer']} on {decision['reviewed_at']}. {decision['reason']}")
             rejections = item['work'].get('rejections', [])
@@ -95,7 +98,7 @@ def render_review_panel(pipeline, state, key_prefix, resume):
                     approve = st.form_submit_button('Confirm identity and continue')
                 else:
                     confirmed, approve = False, False
-                    st.caption('This issue concerns testimony, not just identity. Identity confirmation cannot approve unsupported statements. Defer the document or provide a corrected source in a refreshed run.')
+                    st.caption('The provider response did not complete. Review its diagnostics before retrying with Run / Resume, or defer this document for team review.' if response_error and not blocked else 'This issue concerns testimony, not just identity. Identity confirmation cannot approve unsupported statements. Defer the document or provide a corrected source in a refreshed run.')
                 defer = st.form_submit_button('Defer this document and continue')
             if approve or defer:
                 try:
