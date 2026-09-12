@@ -201,3 +201,48 @@ def test_old_deposition_rechecked_without_repeating_clinical_batch(tmp_path, mon
     assert (tmp_path / 'batch_001.md').read_bytes() == clinical
     assert 'OLD DEPOSITION' not in (tmp_path / 'batch_002.md').read_text()
     assert json.loads(evidence.read_text())['protocol_version'] == 2
+
+
+def test_response_limit_preserves_stages_and_private_diagnostics_on_resume(tmp_path):
+    from tests.test_model_adapters import agent, claude_response
+    from src.deposition_evidence import StageRunner
+    from src.response_recovery import IncompleteResponseError
+    a = agent('anthropic', claude_response('max_tokens', '{"cut":'))
+    a.model = 'claude-opus-5'
+    doc = prepare_document('example.txt', TEXT)
+    path = tmp_path / 'checkpoint.json'
+    runner = StageRunner(doc, a.model, a._call_api_with_retry, path)
+    runner.state['stages'] = {'identity': IDENTITY, 'section 1 of 7': {'statements': []}}
+    runner.save()
+    with pytest.raises(IncompleteResponseError):
+        runner.ask('section 2 of 7', 'synthetic source', lambda data: data, 6000)
+    saved = json.loads(path.read_text())
+    assert list(saved['stages']) == ['identity', 'section 1 of 7']
+    assert 'blocked_stage' not in saved
+    assert saved['response_error']['stage'] == 'section 2 of 7'
+    assert len(saved['response_diagnostics']) == 2
+    assert all(d['stage'] == 'section 2 of 7' for d in saved['response_diagnostics'])
+    assert path.stat().st_mode & 0o777 == 0o600
+    a.client.messages.create.return_value = claude_response('end_turn', '{"statements": []}')
+    runner = StageRunner(doc, a.model, a._call_api_with_retry, path)
+    runner.ask('section 2 of 7', 'synthetic source', lambda data: data, 6000)
+    saved = json.loads(path.read_text())
+    assert 'response_error' not in saved
+    assert len(saved['stages']) == 3
+    assert len(saved['response_diagnostics']) == 2
+
+
+def test_recovered_response_still_must_pass_evidence_validation(tmp_path):
+    from tests.test_model_adapters import agent, claude_response
+    from src.deposition_evidence import StageRunner
+    a = agent('anthropic', None)
+    a.client.messages.create.side_effect = [claude_response('max_tokens'),
+        claude_response('end_turn', '{"date": "unsupported"}'),
+        claude_response('end_turn', '{"date": "unsupported"}')]
+    runner = StageRunner(prepare_document('example.txt', TEXT), a.model,
+        a._call_api_with_retry, tmp_path / 'checkpoint.json')
+    with pytest.raises(EvidenceError):
+        runner.ask('identity', 'source', lambda data: validate_identity(data, TranscriptIndex(TEXT)), 2000)
+    assert runner.state['blocked_stage'] == 'identity'
+    assert not runner.state['stages']
+    assert len(runner.state['rejections']) == 2

@@ -244,3 +244,18 @@ render_review_panel(SimpleNamespace(store=store), state, 'sessions', lambda *a, 
     assert 'Needs review: 2' in app.warning[0].value
     fresh = AppTest.from_string(script).run()
     assert 'Needs review: 2' in fresh.warning[0].value
+
+
+def test_incomplete_response_is_reviewable_and_deferrable_but_not_identity_approval(tmp_path):
+    from src.deposition_review import review_items
+    store, state, doc = fixture(tmp_path)
+    path = store.batches_dir(state.session_id) / 'batch_001.deposition-work.json'
+    work = json.loads(path.read_text())
+    work.pop('blocked_stage')
+    work['response_error'] = {'stage': 'section 2 of 7', 'error': 'max_tokens'}
+    atomic_json(path, work)
+    assert review_count(store, state) == 1
+    assert len(review_items(store.extracted_dir(state.session_id), store.batches_dir(state.session_id))) == 1
+    with pytest.raises(ValueError, match='Confirm the source identity'):
+        decide(store, state, action='approved_identity')
+    assert decide(store, state)['status'] == 'deferred'

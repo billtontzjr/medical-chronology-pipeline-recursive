@@ -10,6 +10,7 @@ from datetime import datetime
 import logging
 import hashlib
 from .deposition_evidence import atomic_json
+from .response_recovery import IncompleteResponseError, record_response
 from .deposition_review import decision_for, deferred_review
 from .ocr_review import deferred_sources
 
@@ -93,41 +94,58 @@ class ChronologyAgent:
             Exception: If all retries fail
         """
         if self.provider == "openai":
-            response = self.client.responses.create(
-                model=self.model, input=prompt, reasoning={"effort": "high"},
-                max_output_tokens=min(128000, max_tokens + 16000), store=False,
-            )
-            if response.status != "completed" or not response.output_text.strip():
-                raise RuntimeError("OpenAI returned an incomplete or empty response; this batch was not saved. Retry with a smaller batch.")
-            return response.output_text.strip()
+            budget = min(128000, max_tokens + 16000)
+            for response_attempt in (1, 2):
+                response = self.client.responses.create(
+                    model=self.model, input=prompt, reasoning={"effort": "high"},
+                    max_output_tokens=budget, store=False,
+                )
+                text = (response.output_text or '').strip()
+                if response.status == "completed" and text:
+                    return text
+                reason = getattr(getattr(response, 'incomplete_details', None), 'reason', None)
+                reason = reason or response.status or 'unknown'
+                retry = reason == 'max_output_tokens' and response_attempt == 1 and budget < 128000
+                record_response(response, self.provider, self.model, reason, budget, text, retry)
+                if not retry:
+                    raise IncompleteResponseError(self.provider, reason, budget)
+                budget = min(128000, max(budget * 2, budget + 16000))
 
         base_delay = 2  # Start with 2 second delay
 
         # temperature is only sent to models that still support it; newer
         # models (Opus 4.7+, Claude 5 family) return a 400 if it is present
+        # Reserve response space for reasoning as well as the requested JSON.
+        # Unknown/legacy model limits are not guessed during recovery.
+        modern = self.model.startswith(('claude-opus-5', 'claude-sonnet-5', 'claude-fable-'))
+        response_limit = 128000 if modern else max_tokens
         request_kwargs = {
             "model": self.model,
-            "max_tokens": min(128000, max_tokens + 16000) if self.model.startswith("claude-fable-") else max_tokens,
+            "max_tokens": min(response_limit, max_tokens + 16000) if modern else max_tokens,
             "messages": [{"role": "user", "content": prompt}],
         }
         if self.model.startswith(self._TEMPERATURE_SUPPORTED_PREFIXES):
             request_kwargs["temperature"] = 0
 
+        response_retry_used = False
         for attempt in range(max_retries):
             try:
-                response = self.client.messages.create(**request_kwargs)
-                if response.stop_reason != "end_turn":
-                    raise RuntimeError("Claude returned an incomplete response; this batch was not saved. Retry with a smaller batch.")
-                # Newer models may include thinking blocks in content;
-                # extract only the text blocks
-                text_parts = [
-                    block.text for block in response.content
-                    if getattr(block, "type", None) == "text"
-                ]
-                result = "\n".join(text_parts).strip()
-                if not result:
-                    raise RuntimeError("Claude returned no text; this batch was not saved.")
-                return result
+                for response_attempt in (1, 2):
+                    response = self.client.messages.create(**request_kwargs)
+                    result = "\n".join(block.text for block in response.content
+                        if getattr(block, "type", None) == "text").strip()
+                    if response.stop_reason == "end_turn" and result:
+                        return result
+                    reason = response.stop_reason or 'unknown'
+                    if reason == 'end_turn':
+                        reason = 'empty_response'
+                    budget = request_kwargs['max_tokens']
+                    retry = reason == 'max_tokens' and not response_retry_used and budget < response_limit
+                    record_response(response, self.provider, self.model, reason, budget, result, retry)
+                    if not retry:
+                        raise IncompleteResponseError(self.provider, reason, budget)
+                    response_retry_used = True
+                    request_kwargs['max_tokens'] = min(response_limit, max(budget * 2, budget + 16000))
 
             except (APIError, APIStatusError) as e:
                 error_message = str(e).lower()

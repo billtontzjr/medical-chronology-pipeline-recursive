@@ -5,6 +5,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from .response_recovery import capture_responses, IncompleteResponseError
 
 
 class EvidenceError(ValueError):
@@ -91,7 +92,19 @@ class StageRunner:
         feedback = ''
         for attempt in (1, 2):
             self.progress(f'↳ Deposition: {stage}, attempt {attempt}/2')
-            raw = self.call_api(prompt+feedback, max_tokens=max_tokens)
+            def retain_response(details):
+                self.state.setdefault('response_diagnostics', []).append({'stage': stage, **details})
+                self.save()
+                if details['retry_with_larger_budget']:
+                    self.progress(f'↳ Deposition: {stage} reached the response limit; retrying once with more output space')
+            try:
+                with capture_responses(retain_response):
+                    raw = self.call_api(prompt+feedback, max_tokens=max_tokens)
+            except IncompleteResponseError as exc:
+                self.state['response_error'] = {'stage': stage, 'error': str(exc)}
+                self.save()
+                raise
+            self.state.pop('response_error', None)
             try:
                 data = json.loads(re.sub(r'^```(?:json)?\s*|\s*```$', '', raw.strip()))
                 result = validator(data)
