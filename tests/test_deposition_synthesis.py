@@ -48,13 +48,17 @@ def model(calls, missing=False, interrupt_at=None):
         assert len(prompt) < 160000
         assert 'Extract relevant testimony from this slice' not in prompt
         assert "Extract the deposition's actual session date" not in prompt
+        if 'EXACT CITATION SUPPORT AUDIT' in prompt:
+            group = json.loads(prompt.split('CITED SENTENCES:\n')[1])
+            return json.dumps({'reviews': [{'statement_id': n['statement_id'], 'verdict': 'supported',
+                'reason': 'Every factual clause matches its exact citations.'} for n in group]})
         pack = json.loads(prompt.split('ORIGINAL EVIDENCE GROUP:\n')[1])
         if interrupt_at and len(calls) == interrupt_at:
             raise RuntimeError('simulated interruption')
         if 'BOUNDED DEPOSITION CONSOLIDATION' in prompt:
             return json.dumps({'statements': [{'text': SENTENCE, 'evidence_refs': pack[0]['evidence_refs']}]})
         assert 'FINAL DEPOSITION EVIDENCE AND COVERAGE AUDIT' in prompt
-        return json.dumps({'reviews': [{'statement_id': 1, 'verdict': 'supported', 'reason': 'Denial and uncertainty preserved.'}],
+        return json.dumps({'consistency_reviews': [{'statement_id': 1, 'verdict': 'consistent', 'reason': 'Denial and uncertainty preserved.'}],
             'coverage': [{'source_note_id': n['source_note_id'], 'verdict': 'missing' if missing else 'covered',
                          'summary_statement_ids': [] if missing else [1],
                          'reason': 'Material qualifier omitted.' if missing else 'Same qualified testimony retained.'} for n in pack]})
@@ -72,7 +76,7 @@ def test_large_saved_deposition_reaches_word_export_with_every_note_audited(tmp_
     evidence = json.loads((batches / 'batch_001.deposition.json').read_text())
     coverage = [c['source_note_id'] for audit in evidence['aggregation']['audits'] for c in audit['coverage']]
     assert sorted(coverage) == list(range(1, len(notes)+1))
-    assert len(calls) == 2 * evidence['aggregation']['source_groups']
+    assert len(calls) == 2 * evidence['aggregation']['source_groups'] + len(evidence['aggregation']['support_audits'])
     assert evidence['aggregation']['source_groups'] > 1
     a.extract_header = lambda *args: {'patient_name': 'JAMIE EXAMPLE', 'date_of_birth': '[See Records]', 'date_of_injury': '[See Records]'}
     a.generate_summary_and_gaps = lambda *args: {'summary_md': 'Summary.', 'gaps_md': 'Source review remains distinct.'}
@@ -111,7 +115,7 @@ def test_missing_material_gets_one_repair_then_requires_reviewer(tmp_path):
     assert not (batches / 'batch_001.md').exists()
     checked = json.loads((batches / 'batch_001.deposition-work.json').read_text())
     assert checked['blocked_stage'] == 'aggregation evidence and coverage'
-    assert len(calls) == 4 * checked['aggregation']['source_groups']
+    assert len(calls) == 4 * checked['aggregation']['source_groups'] + 2
     a._call_api_with_retry = lambda *args, **kwargs: pytest.fail('No unchanged substantive retry')
     with pytest.raises(DepositionReviewRequired, match='Needs review'):
         a.generate_batches(str(source), str(batches))
@@ -138,3 +142,47 @@ def test_pack_construction_is_lossless_and_audit_cannot_skip_or_duplicate_notes(
                             'summary_statement_ids': [1], 'reason': 'Matched.'} for _ in pack]}
     with pytest.raises(EvidenceError, match='repeated or omitted'):
         validate_audit(result, [{'text': 'summary'}], pack, validate_support_review)
+
+
+def test_large_citation_expansion_is_packed_without_losing_sentences():
+    from src.deposition_synthesis import compact_statements, support_packs
+    statements = [{'text': SENTENCE, 'evidence_refs': [[4, 94]], 'evidence': ['Q. Surgery? A. No surgery; pain sometimes.\n' * 91]} for _ in range(71)]
+    assert len(json.dumps(compact_statements(statements, with_evidence=True))) > 160000
+    assert len(json.dumps(compact_statements(statements))) < 60000
+    packs = support_packs(statements)
+    assert len(packs) > 1
+    assert all(len(json.dumps(p)) <= 60000 for p in packs)
+    assert [s['global_statement_id'] for p in packs for s in p] == list(range(1, 72))
+    assert all(s['evidence'] == statements[0]['evidence'] for p in packs for s in p)
+
+
+def test_old_size_only_block_recovers_candidate_but_requires_new_primary_audits(tmp_path):
+    from src.deposition_synthesis import recoverable_aggregation_block, evidence_packs
+    a, source, batches, output, original, notes = saved_large_run(tmp_path)
+    path = batches / 'batch_001.deposition-work.json'
+    state = json.loads(path.read_text())
+    packs = evidence_packs(notes)
+    assert len(packs) > 2
+    candidate = {'statements': [{'text': SENTENCE, 'evidence_refs': packs[1][0]['evidence_refs']}]}
+    first = {'statements': [{'text': SENTENCE, 'evidence_refs': packs[0][0]['evidence_refs']}]}
+    state['stages'][f'aggregation v1 draft group 1 of {len(packs)}'] = first
+    blocked = f'aggregation v1 draft group 2 of {len(packs)}'
+    state['blocked_stage'] = blocked
+    state['rejections'] = [{'stage': blocked, 'attempt': n, 'response': json.dumps(candidate),
+        'error': 'The cumulative deposition draft is not bounded; preserve material testimony in a concise paragraph with precise citations.'} for n in (1, 2)]
+    path.write_text(json.dumps(state))
+    assert recoverable_aggregation_block(state)
+    assert not recoverable_aggregation_block({**state, 'support_issues': ['Uncertain testimony']})
+    changed = copy.deepcopy(state)
+    changed['rejections'][1]['error'] = 'Citation was not included in the supplied synthesis evidence.'
+    assert not recoverable_aggregation_block(changed)
+    calls = []
+    a._call_api_with_retry = model(calls)
+    a.generate_batches(str(source), str(batches))
+    saved = json.loads(path.read_text())
+    assert saved['rejections'] == state['rejections']
+    assert len(saved['reused_aggregation_candidates']) == 2
+    assert saved['aggregation']['protocol'] == 2
+    assert saved['aggregation']['support_audits']
+    assert len([p for p in calls if 'BOUNDED DEPOSITION CONSOLIDATION' in p]) == len(packs)-2
+    assert len([p for p in calls if 'FINAL DEPOSITION EVIDENCE AND COVERAGE AUDIT' in p]) == len(packs)
