@@ -52,7 +52,8 @@ from .session_lock import session_lock
 from .download_snapshot import download_snapshot
 from .session_model import saved_model, save_model_config
 from .deposition_review import save_decision, apply_review_updates
-from .ocr_review import save_ocr_decision, apply_ocr_updates, deferred_sources, blocking_coverage
+from .ocr_review import (save_ocr_decision, apply_ocr_updates, deferred_sources, blocking_coverage,
+                         selected_retries, retry_revision)
 
 
 DEFAULT_DESTINATION_PREFIX = OUTPUT_ROOT
@@ -330,7 +331,7 @@ class MedicalChronologyPipeline:
                 cb(f"⚠️ OCR coverage: {coverage['files_needing_review']} file(s) need page review; see the coverage report")
             if blocking_coverage(coverage, deferred_sources(self.store.input_dir(session_id), self.store.extracted_dir(session_id))):
                 self.store.mark_phase(state, PHASE_OCR, STATUS_FAILED)
-                raise RuntimeError("OCR has failed or missing pages. Resume to retry extraction before generating a chronology.")
+                raise RuntimeError("OCR has failed or missing pages. Open Review documents to retry or defer the affected files before generating a chronology.")
 
             # Phase 3 — generate batches (resumable at batch granularity)
             self._check_pause(session_id)
@@ -458,11 +459,16 @@ class MedicalChronologyPipeline:
         # Resume: skip PDFs whose .txt already exists and is non-empty
         pending: List[Path] = []
         deferred = deferred_sources(input_dir, extracted_dir)
+        retry_completed = dict(state.phases[PHASE_OCR].data.get('review_retry_completed', {}))
+        selected = selected_retries(self.store.session_dir(state.session_id), retry_completed)
         for p in pdf_paths:
             if str(p.relative_to(input_dir)) in deferred:
                 continue
             txt = extracted_dir / p.relative_to(input_dir).with_suffix(".txt")
             sidecar = coverage_path(p, input_dir, extracted_dir)
+            if (selected is not None and str(p.relative_to(input_dir)) not in selected
+                    and (txt.exists() or sidecar.exists())):
+                continue  # A team retry must not re-extract other reviewed/legacy files.
             try:
                 saved = json.loads(sidecar.read_text()) if sidecar.exists() else {}
             except (ValueError, TypeError):
@@ -502,11 +508,15 @@ class MedicalChronologyPipeline:
                     stale.unlink()
                 self.logger.error("OCR returned no usable text; page coverage records the affected file")
             save_coverage(r, pdf, input_dir, extracted_dir)
+            name = str(pdf.relative_to(input_dir))
+            if selected is not None and name in selected:
+                retry_completed[name] = retry_revision(self.store.session_dir(state.session_id), name)
+                self.store.update_phase_data(state, PHASE_OCR, {'review_retry_completed': retry_completed})
 
         coverage = collect_coverage(input_dir, extracted_dir)
         self.store.update_phase_data(state, PHASE_OCR, {'coverage': coverage})
         if blocking_coverage(coverage, deferred):
-            raise RuntimeError("OCR has failed or missing pages. Completed files are saved; resume to retry failed files.")
+            raise RuntimeError("OCR has failed or missing pages. Completed files are saved; open Review documents to retry or defer the affected files.")
         # Verify at least something came out
         if not list(extracted_dir.rglob("*.txt")) and not deferred:
             raise RuntimeError("No text could be extracted from PDFs")

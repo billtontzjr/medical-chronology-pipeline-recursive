@@ -121,6 +121,19 @@ def blocking_coverage(coverage, deferred):
             and (r.get('technical_failure') or r.get('coverage_status') == 'unknown_legacy')]
 
 
+def selected_retries(session, completed):
+    decisions = _decisions(session)
+    if not decisions:
+        return None  # Ordinary initial extraction/resume retains its existing behavior.
+    return {name for name, decision in decisions.items()
+            if decision['status'] == 'retry_requested'
+            and completed.get(name) != decision['revision']}
+
+
+def retry_revision(session, name):
+    return _decisions(session)[name]['revision']
+
+
 def ocr_manual_reviews(batches_dir):
     reviews = []
     for name, d in _decisions(Path(batches_dir).parent).items():

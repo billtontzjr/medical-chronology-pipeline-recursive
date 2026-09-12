@@ -16,7 +16,7 @@ def review_count(store, state):
         if work.get('blocked_stage'):
             sources.add(str(Path(work['source_file']).with_suffix('')))
     sources.update(str(Path(x['source_file']).with_suffix('')) for x in collect_manual_reviews(store.batches_dir(state.session_id)))
-    return max(len(sources), state.phases['header'].data.get('manual_review_count', 0))
+    return len(sources) if sources else state.phases['header'].data.get('manual_review_count', 0)
 
 
 def ranges_text(refs):
@@ -29,6 +29,10 @@ def render_review_panel(pipeline, state, key_prefix, resume):
     if not count:
         return
     st.warning(f'Needs review: {count} document(s). Unresolved items remain flagged even when a draft completes.')
+    coverage_count = len(ocr_items(pipeline.store, state))
+    withheld_count = state.phases['header'].data.get('manual_review_count', 0)
+    if coverage_count or withheld_count:
+        st.caption(f'{coverage_count} document(s) have OCR coverage flags. The saved draft has {withheld_count} withheld source section(s). These counts may overlap.')
     panel_key = f'review_open_{key_prefix}_{state.session_id}'
     if st.button(f'Review documents ({count})', key=panel_key + '_button'):
         st.session_state[panel_key] = not st.session_state.get(panel_key, False)
@@ -121,6 +125,7 @@ def render_review_panel(pipeline, state, key_prefix, resume):
                     and st.checkbox('Show original file download', key=key+'_show_pdf')):
                 st.download_button('Download original file for review', source.read_bytes(), file_name=source.name, mime='application/pdf', key=key+'_pdf')
             st.caption('Deferring or retrying this source preserves the old draft and rebuilds generation because source composition can change. Other completed OCR files are retained. For a replacement source, update the source folder and start a refreshed run.')
+            st.caption('Retry applies to this file. Other unresolved extraction problems may still require separate review decisions before generation continues.')
             with st.form(key+'_form'):
                 reviewer = st.text_input('Reviewer name', key=key+'_reviewer')
                 note = st.text_area('Decision note', key=key+'_note')
