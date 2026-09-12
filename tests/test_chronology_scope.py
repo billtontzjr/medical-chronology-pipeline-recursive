@@ -88,6 +88,26 @@ def test_legal_notice_is_excluded_but_actual_deposition_survives(tmp_path):
     assert docs[0]['content'] == testimony
 
 
+def test_witness_review_letter_in_transcript_folder_preserves_attachments(tmp_path):
+    folder = tmp_path / 'Deposition of Jamie Example' / 'Transcript'
+    folder.mkdir(parents=True)
+    letter = ('=== SOURCE PDF PAGE 1 ===\nRe: Deposition of Jamie Example\n'
+              'Dear Jamie Example\nThe original transcript of your deposition is now available for review.\n'
+              'Contact our office for an appointment to review the transcript and receive an errata sheet.\n')
+    attachment = '=== SOURCE PDF PAGE 2 ===\nPhysical Examination: Lumbar tenderness.\nAssessment: Pain.'
+    (folder / 'Witness Letter.txt').write_text(letter + attachment)
+    a = agent()
+    docs = a._read_extracted_files(str(tmp_path))
+    assert len(docs) == 1
+    assert 'Lumbar tenderness' in docs[0]['content']
+    assert 'available for review' not in docs[0]['content']
+    assert docs[0].get('document_type') != 'deposition'
+    assert a._source_exclusions[0]['category'] == 'correspondence'
+    assert a._source_exclusions[0]['extracted_text_end'] == len(letter)
+    # A whole, unmarked mixed source must remain available for semantic review.
+    assert screen_source('Witness Letter.txt', letter + attachment.replace('=== SOURCE PDF PAGE 2 ===', ''))[0].find('Lumbar tenderness') >= 0
+
+
 def response(mixed=False):
     return {'sources': [{'id': 'D001', 'scope': 'mixed' if mixed else 'medical'}],
             'entries': [{'record_type': 'clinical_care', 'source_ids': ['D001'], 'text': MEDICAL}]}

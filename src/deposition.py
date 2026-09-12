@@ -30,8 +30,12 @@ def prepare_document(filename, content):
     Character offsets refer to the extracted text, not PDF page numbers.
     """
     opening = content[:2000]
-    likely = bool(re.search(r"depo(?:sition|nent)|transcript", filename, re.I)
-                  or re.search(r"deposition\s+(?:summary|transcript)|deponent\s*:", opening, re.I))
+    # A deposition folder may also contain clinical exhibits and witness letters.
+    # Use the document name and its own contents, not its ancestors, as evidence.
+    document_name = re.split(r"[/\\]", filename)[-1]
+    likely = bool(re.search(r"depo(?:sition|nent)|transcript", document_name, re.I)
+                  or re.search(r"deposition\s+(?:summary|transcript)|deponent\s*:", opening, re.I)
+                  or re.search(r"(?im)^\s*(?:\d+\s+)?DEPOSITION OF\b", opening))
     has_transcript = transcript_structure(content) and bool(
         re.search(r"deposition|deponent|circuit court|superior court|district court", content[:20000], re.I))
     if not likely and not has_transcript:

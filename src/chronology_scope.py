@@ -83,6 +83,13 @@ def screen_source(filename, content):
                     break
             if category is None and re.search(r'(?im)^\s*(?:From|To|Subject):', opening):
                 category = 'correspondence'
+            # Reporter letters inviting a witness to review/sign a transcript
+            # are administration, even when stored in a deposition folder.
+            if (category is None
+                    and re.search(r'(?im)^\s*Dear\b', opening)
+                    and re.search(r'\btranscript\b[\s\S]{0,100}\bavailable for review\b', opening, re.I)
+                    and re.search(r'\b(?:errata sheet|appointment to review|unsigned original)\b', unit, re.I)):
+                category = 'correspondence'
             # Ordinary letters without these markers are screened semantically.
         if category:
             exclusions.append({'source_file': filename, 'category': category,
@@ -210,4 +217,3 @@ def parse_scoped_response(raw, documents):
         if source['scope'] in {'medical', 'mixed'} and sid not in referenced:
             raise ScopeReviewRequired('A retained medical source has no supported entry; review before omitting it.')
     return '\n\n'.join(kept), exclusions
-
