@@ -9,6 +9,7 @@ from .chronology_scope import ScopeReviewRequired, parse_scoped_response, INCLUD
 from .source_fidelity import (DiagnosticEvidenceError, DiagnosticStructureError,
                               render_diagnostic, validate_diagnostic_structure)
 from .source_pages import page_units
+from .ocr_review import ocr_manual_reviews
 
 DRAFT_LABEL = 'Draft complete—manual review required'
 
@@ -155,7 +156,7 @@ def parse_draft_response(raw, documents):
 
 
 def collect_manual_reviews(batches_dir):
-    reviews = {}
+    reviews = {item['id']: item for item in ocr_manual_reviews(batches_dir)}
     for path in sorted(Path(batches_dir).glob('batch_*.scope.json')):
         for item in json.loads(path.read_text()).get('manual_reviews', []):
             reviews.setdefault(item['id'], dict(item, batch=path.name.split('.')[0]))
@@ -175,6 +176,10 @@ def review_markdown(reviews):
             f"Issue: {item['reason']}\nHandling: {item['handling']}\n"
             'Team action: Compare the original pages, confirm dates/provider/treatment, and add supported encounters '
             'to the reviewed chronology. Record reviewer, date and resolution.\nReviewer: __________\nReview date: __________\nResolution: __________')
+        if item.get('reviewer'):
+            paragraphs.append(f"Recorded team decision: {item.get('resolution', 'Deferred, not verified')}\n"
+                              f"Reviewer: {item['reviewer']}\nDecision date: {item.get('review_date', '')}\n"
+                              'This item remains unresolved. Reopen its document review panel to reconsider it.')
         if item.get('source_pages'):
             paragraphs.append('Physical PDF pages in this source section: ' +
                               ', '.join(map(str, item['source_pages'])) +

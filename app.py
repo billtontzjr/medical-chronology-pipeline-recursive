@@ -20,6 +20,7 @@ LIVE_MSG_PATTERN = re.compile(r"Page\s+\d+\s*/\s*\d+")
 
 from src.session_model import saved_model
 from src.manual_review import DRAFT_LABEL
+from src.review_ui import review_count, render_review_panel
 from src.word_export import chronology_docx, output_zip, saved_records
 from src.pipeline import DEFAULT_DESTINATION_PREFIX, MedicalChronologyPipeline
 from src.session_state import (
@@ -125,6 +126,8 @@ def render_phase_tracker(state: SessionState, container) -> None:
 def session_badge(status: str, manual_review_count: int = 0) -> str:
     if status == STATUS_COMPLETE and manual_review_count:
         return f"🟠 {DRAFT_LABEL} ({manual_review_count} source sections)"
+    if manual_review_count and status in (STATUS_FAILED, 'pending'):
+        return f"🟠 Needs review ({manual_review_count} documents)"
     icons = {
         "pending": "⚪",
         STATUS_COMPLETE: "🟢",
@@ -190,6 +193,7 @@ def run_session_with_progress(
 
 
 def _render_source_review(pipeline, state, key_prefix):
+    render_review_panel(pipeline, state, key_prefix, run_session_with_progress)
     if state.phases[PHASE_DOWNLOAD].status == STATUS_COMPLETE and not state.phases[PHASE_DOWNLOAD].data.get('manifest_version'):
         st.warning('This older run has no confirmed source inventory. Start a refreshed run before relying on it for complete coverage.')
     if st.button('Start refreshed run', key=f'refresh_{key_prefix}_{state.session_id}',
@@ -548,7 +552,7 @@ with tab_new:
             st.markdown("---")
             st.subheader(f"Current session: `{state.session_id}`")
             st.caption(
-                f"Status: {session_badge(state.status, state.phases[PHASE_HEADER].data.get('manual_review_count', 0))}  •  "
+                f"Status: {session_badge(state.status, review_count(pipeline.store, state))}  •  "
                 f"Destination: `{state.destination_folder}`"
             )
             tracker = st.container()
@@ -601,9 +605,11 @@ with tab_sessions:
         st.info("No sessions yet. Start one from the **New Run** tab.")
     else:
         for s in sessions:
+            pending_documents = review_count(pipeline.store, s)
             with st.expander(
-                f"{session_badge(s.status, s.phases[PHASE_HEADER].data.get('manual_review_count', 0))}  **{s.session_id}**  "
-                f"•  patient: `{s.patient_id or '—'}`  •  updated {s.updated_at}",
+                f"{session_badge(s.status, pending_documents)}  **{s.session_id}**  "
+                f"•  patient: `{s.patient_id or '—'}`  •  updated {s.updated_at}"
+                + (f" • 🟠 Needs review: {pending_documents} document(s)" if pending_documents else ''),
                 expanded=(s.status in (STATUS_IN_PROGRESS, STATUS_PAUSED, STATUS_FAILED)),
             ):
                 st.caption(f"Destination: `{s.destination_folder}`")
