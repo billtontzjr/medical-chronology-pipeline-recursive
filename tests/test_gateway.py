@@ -118,3 +118,41 @@ def test_gateway_without_password_fails_closed(monkeypatch):
             for path in ('/', '/media/file.docx', '/_stcore/stream'):
                 assert (await client.get(path)).status == 503
     asyncio.run(scenario())
+
+
+def test_saved_run_survives_login_and_wrong_password(monkeypatch):
+    monkeypatch.setenv('TEAM_PASSWORD', PASSWORD)
+    monkeypatch.setattr('serve.attempt_allowed', lambda: True)
+    session_id = 'synthetic_case_20260912_123456'
+    async def scenario():
+        async with TestClient(TestServer(create_app(secret=SECRET))) as client:
+            response = await client.get('/?session_id=' + session_id, allow_redirects=False)
+            assert response.status == 303
+            assert response.headers['Location'] == '/login?session_id=' + session_id
+            page = await client.get(response.headers['Location'])
+            assert f'name="session_id" value="{session_id}"' in await page.text()
+            origin = str(client.make_url('').origin())
+            form = {'password': 'wrong', 'session_id': session_id}
+            denied = await client.post('/login', data=form, headers={'Origin': origin})
+            assert denied.status == 401
+            assert f'name="session_id" value="{session_id}"' in await denied.text()
+            assert COOKIE not in denied.cookies
+            form['password'] = PASSWORD
+            accepted = await client.post('/login', data=form, headers={'Origin': origin}, allow_redirects=False)
+            assert accepted.status == 303
+            assert accepted.headers['Location'] == '/?session_id=' + session_id
+            assert accepted.cookies[COOKIE]['secure'] and accepted.cookies[COOKIE]['httponly']
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('session_id', ['//foreign.invalid', '../private', '<script>alert(1)</script>', 'x\r\nLocation: /bad', 'x' * 129])
+def test_login_return_rejects_invalid_session_ids(monkeypatch, session_id):
+    monkeypatch.setenv('TEAM_PASSWORD', PASSWORD)
+    monkeypatch.setattr('serve.attempt_allowed', lambda: True)
+    async def scenario():
+        async with TestClient(TestServer(create_app(secret=SECRET))) as client:
+            page = await client.get('/login', params={'session_id': session_id})
+            assert 'name="session_id"' not in await page.text()
+            accepted = await client.post('/login', data={'password': PASSWORD, 'session_id': session_id}, allow_redirects=False)
+            assert accepted.headers['Location'] == '/'
+    asyncio.run(scenario())
