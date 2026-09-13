@@ -33,7 +33,7 @@ from .word_export import chronology_docx
 from .output_safety import validate_destination
 from .companion_reports import generate_reports, COMPANION_PROTOCOL
 
-EXPORT_PROTOCOL = "medical-workspace-export-v3"
+EXPORT_PROTOCOL = "medical-workspace-export-v4"
 
 
 def header_date(value):
@@ -41,6 +41,16 @@ def header_date(value):
         return datetime.strptime(value, "%m/%d/%Y").strftime("%B %d, %Y").replace(" 0", " ")
     except (TypeError, ValueError):
         return "Not documented"
+
+
+def injury_header(patients):
+    dates = {p['doi'] for p in patients if p.get('doi')}
+    dates.update(ref['date'] for p in patients for ref in p.get('doi_evidence', []) if ref.get('date'))
+    if len(dates) > 1:
+        return "Conflicting source dates: " + "; ".join(sorted(dates)) + " (review required)"
+    if not dates:
+        return "Not established from verified source fields"
+    return header_date(next(iter(dates)))
 
 
 def clinical_order(entry):
@@ -867,14 +877,13 @@ class MedicalRun:
         names = [p["name"] for p in patients if p.get("name")]
         source_name = max(names, key=lambda n: len(n.split())) if names else self.case["name"]
         source_dobs = {p["dob"] for p in patients if p.get("dob")}
-        source_dois = {p["doi"] for p in patients if p.get("doi")}
         header = (
             "MEDICAL RECORDS SUMMARY\n"
             + source_name.upper()
             + "\nDate of Birth: "
             + header_date(next(iter(source_dobs)) if len(source_dobs) == 1 else None)
             + "\nDate of Injury: "
-            + header_date(next(iter(source_dois)) if len(source_dois) == 1 else None)
+            + injury_header(patients)
             + "\n\n"
         )
         notice = (
