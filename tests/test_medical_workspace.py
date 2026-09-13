@@ -654,6 +654,81 @@ def test_formatted_visit_still_rejects_unsupported_dates_or_provider(failure):
         validate_document(data, pages, CASE, MEDICAL_POLICY, DOC)
 
 
+@pytest.mark.parametrize("ellipsis", ["...", "…"])
+def test_shortened_sentence_citations_restore_the_entire_original_passage(ellipsis):
+    from src.medical_evidence import source_quote
+
+    first = "The neck pain is rated 7/10 on the pain scale and is constant."
+    last = "He reports numbness and tingling in the right arm and hand."
+    middle = "\nPrior symptoms had improved temporarily with medication.\n"
+    passage = first + middle + last
+    assert source_quote(first + " " + ellipsis + " " + last, passage) == passage
+    # Do not join excerpts, suppress qualifications, or change clinical wording.
+    assert "improved temporarily" in source_quote(first + " ... " + last, passage)
+    assert (
+        source_quote(first + " ... " + last.replace("right", "left"), passage) is None
+    )
+    assert source_quote(last + " ... " + first, passage) is None
+    assert source_quote(first + " ... " + last, passage + "\n" + first) is None
+    assert source_quote(first + " ... " + last, first) is None
+    assert (
+        source_quote("No ... fracture.", "No history provided. There is a fracture.")
+        is None
+    )
+    assert (
+        source_quote(
+            first + " ... " + last, first + "\n" + "Unrelated text. " * 200 + last
+        )
+        is None
+    )
+
+
+def test_expanded_source_context_is_sent_to_audit_and_can_reject_candidate(tmp_path):
+    first = "The neck pain is rated 7/10 on the pain scale and is constant."
+    last = "He reports numbness and tingling in the right arm and hand."
+    passage = (
+        first + "\nThese symptoms describe a prior episode that has resolved.\n" + last
+    )
+    text = TEXT + passage
+    data = response()
+    data["sections"][0]["entries"][0]["evidence"].append(
+        {"page": 1, "quote": first + " ... " + last}
+    )
+    inspected = []
+
+    def call(prompt, max_tokens):
+        if prompt.startswith("Verify the candidate"):
+            candidate = json.loads(prompt[prompt.index('{"policy"') :])["candidate"][
+                "entries"
+            ][0]
+            inspected.append(candidate["evidence"][-1]["quote"])
+            return json.dumps(
+                {
+                    "entries": [
+                        {
+                            "id": candidate["id"],
+                            "verdict": "unsupported",
+                            "reason": "The restored passage describes prior rather than current symptoms.",
+                        }
+                    ],
+                    "missing_encounters": [],
+                }
+            )
+        return json.dumps(data)
+
+    result = extract_group(
+        [{"page": 1, "text": text}],
+        CASE,
+        MEDICAL_POLICY,
+        DOC,
+        call,
+        tmp_path / "work.json",
+    )
+    assert inspected == [passage]
+    assert not result["entries"]
+    assert result["reviews"][0]["kind"] == "source_evidence"
+
+
 def test_historical_and_new_cases_are_isolated_and_collisions_preserved(store):
     from src.session_state import SessionStore
 
