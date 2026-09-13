@@ -14,7 +14,7 @@ from .response_recovery import capture_responses, IncompleteResponseError
 from .deposition import transcript_structure
 from .chronology_scope import _has_medical_content
 
-PROTOCOL = "medical-page-evidence-v6"
+PROTOCOL = "medical-page-evidence-v7"
 PAGE_LIMIT = 48000
 CLINICAL = {"clinical_care", "medical_evaluation", "diagnostic_test", "medical_billing"}
 EXCLUDED = {
@@ -275,13 +275,7 @@ def page_groups(pages):
         yield group
 
 
-def source_quote(quote, page):
-    """Return the actual source span, allowing only presentation differences.
-
-    In addition to whitespace/case, allow an Oxford comma before 'and' and a
-    line break after an alphabetic hyphen. Never remove punctuation in numbers,
-    change words, join separated passages, or search another physical page.
-    """
+def _quote_pattern(quote):
     value = normalized(quote)
     value = re.sub(r",(?=\s+and\b)", "", value)
     value = re.sub(r"(?<=[a-z])-\s+(?=[a-z])", "-", value)
@@ -298,8 +292,40 @@ def source_quote(quote, page):
         )
         for part in parts
     )
-    match = re.search(pattern, page, re.I)
-    return match[0] if match else None
+    return pattern
+
+
+def source_quote(quote, page):
+    """Return an actual contiguous source span, preserving omitted context.
+
+    Formatting tolerance covers whitespace/case, an Oxford comma and line
+    breaks after alphabetic hyphens. For explicit ellipses between complete
+    sentences, restore the intervening source text instead of joining excerpts.
+    Each sentence must match uniquely, in order, on this same physical page.
+    """
+    match = re.search(_quote_pattern(quote), page, re.I)
+    if match:
+        return match[0]
+    fragments = re.split(r"\s+(?:\.{3}|…)\s+", quote.strip())
+    if not 2 <= len(fragments) <= 4 or any(
+        len(fragment) < 24
+        or len(fragment.split()) < 5
+        or not re.search(r"[.!?]$", fragment)
+        for fragment in fragments
+    ):
+        return None
+    spans = []
+    for fragment in fragments:
+        matches = list(re.finditer(_quote_pattern(fragment), page, re.I))
+        if len(matches) != 1:
+            return None
+        spans.append(matches[0].span())
+    if any(
+        not 0 <= following[0] - prior[1] <= 2000
+        for prior, following in zip(spans, spans[1:])
+    ):
+        return None
+    return page[spans[0][0] : spans[-1][1]]
 
 
 def exact_evidence(items, pages):
@@ -463,6 +489,7 @@ Never turn a historical mention, bill, deposition or legal allegation into a vis
 Every header and factual clause must follow the cited evidence. Include exact
 page excerpts supporting facts, dates, identity and qualifications. Patient names
 and dates must come from the actual source, never the expected case metadata.
+Quote contiguous source passages; never shorten quotations with ellipses.
 Do not confuse birth/injury/signature dates with service dates. Unknown identity,
 ambiguous date roles, or unreadable material becomes an explicit review section.
 For diagnostic-only reports use diagnostic_result instead of generated body:
