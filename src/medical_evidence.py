@@ -16,6 +16,7 @@ from .deposition import transcript_structure
 from .chronology_scope import _has_medical_content
 
 PROTOCOL = "medical-page-evidence-v8"
+VALIDATION_VERSION = "medical-source-validation-v2"
 PAGE_LIMIT = 48000
 CLINICAL = {"clinical_care", "medical_evaluation", "diagnostic_test", "medical_billing"}
 EXCLUDED = {
@@ -692,7 +693,8 @@ def validate_document(data, pages, case, policy, document, identity_context=()):
                     ):
                         supported_dates.add(ref["date"])
                     elif not re.match(
-                        r"^\s*(?:electronically\s+)?(?:co[- ]?)?signed\s+by\b",
+                        r"^\s*(?:(?:electronically\s+)?(?:co[- ]?)?signed\s+by\b|"
+                        r"(?:adm(?:ission|itted)?|d/c|discharg(?:e|ed)|printed|generated|faxed)\s*(?::|date\b|on\b))",
                         ref["quote"],
                         re.I,
                     ):
@@ -701,7 +703,8 @@ def validate_document(data, pages, case, policy, document, identity_context=()):
                             "date",
                             [ref["page"]],
                         )
-                    # An exact signature is ancillary evidence. It cannot
+                    # An exact signature or administrative date is ancillary.
+                    # It cannot
                     # establish a visit date or veto an independently cited
                     # service-date field. Other invalid date fields still fail.
                 if supported_dates != (set(dates) - {"Undated"}):
@@ -924,8 +927,11 @@ No facts are approved merely because they appear in a previous draft.
             raise FormatError("Missing encounters need valid source pages and reasons.")
         return data
 
+    # A validator repair may admit more of the same retained model response.
+    # Keep its earlier audit, and audit the changed candidate under a new key.
+    audit_key = digest(audit_prompt)[:16]
     audit = retained_call(
-        Path(checkpoint).with_suffix(".audit.json"), audit_prompt, call, validate_audit
+        Path(checkpoint).with_suffix(f".audit-{audit_key}.json"), audit_prompt, call, validate_audit
     )
     checked = {r["id"]: r for r in audit["entries"]}
     kept = []
@@ -958,8 +964,9 @@ No facts are approved merely because they appear in a previous draft.
     # One bounded source-grounded recovery before handing work to the team.
     # No unchecked response replaces a previously checked entry.
     if recovery is None and any(r["kind"] in ("date", "patient_identity", "coverage", "diagnostic", "attribution") for r in result["reviews"]):
+        recovery_key = digest(result["reviews"])[:16]
         recovered = extract_group(pages, case, policy, document, call,
-                                  Path(checkpoint).with_suffix(".recovery.json"), identity_context,
+                                  Path(checkpoint).with_suffix(f".recovery-{recovery_key}.json"), identity_context,
                                   recovery=result["reviews"])
         keys = {(e["date"], e["provider"], e["service_name"]) for e in recovered["entries"]}
         recovered["entries"].extend(e for e in kept if (e["date"], e["provider"], e["service_name"]) not in keys)

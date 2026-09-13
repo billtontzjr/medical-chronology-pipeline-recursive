@@ -14,6 +14,7 @@ from .case_store import digest
 from .deposition_evidence import atomic_json
 from .medical_evidence import (
     PROTOCOL,
+    VALIDATION_VERSION,
     EvidenceReview,
     FormatError,
     extract_group,
@@ -633,7 +634,10 @@ class MedicalRun:
             resultpath = self.work / doc["id"] / revision / "result.json"
             saved_result = json.loads(resultpath.read_text()) if resultpath.exists() else None
             context_hash = digest([self.case["verified_names"], self.case["verified_service_dates"]])
-            if saved_result and (not saved_result["reviews"] or saved_result.get("context_hash") == context_hash):
+            if saved_result and (not saved_result["reviews"] or (
+                saved_result.get("context_hash") == context_hash
+                and saved_result.get("validation_version") == VALIDATION_VERSION
+            )):
                 result = saved_result
             else:
                 eligible, exclusions = exclude_testimony(pages)
@@ -660,6 +664,7 @@ class MedicalRun:
                     for key in result:
                         result[key].extend(checked[key])
                 result["context_hash"] = context_hash
+                result["validation_version"] = VALIDATION_VERSION
                 atomic_json(resultpath, result)
             low_confidence = [p["page"] for p in doc.get("pages", []) if p.get("status") == "text" and isinstance(p.get("word_confidence"), (float, int)) and p["word_confidence"] < .80]
             if low_confidence:
