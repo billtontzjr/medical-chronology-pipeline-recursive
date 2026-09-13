@@ -156,6 +156,14 @@ class CaseStore:
         metadata = self.get(case_id, "case", "metadata") or {}
         issues = self.all(case_id, "issues")
         job = self.job(case_id)
+        export = self.get(case_id, "case", "export") or {}
+        entry_ids = export.get("entry_ids")
+        entries_count = (
+            len(entry_ids)
+            if isinstance(entry_ids, list)
+            and state.get("phases", {}).get("header", {}).get("status") == "complete"
+            else len(self.all(case_id, "entries"))
+        )
         return {
             **state,
             **metadata,
@@ -172,7 +180,7 @@ class CaseStore:
             ),
             "job": job,
             "documents_count": len(self.all(case_id, "documents")),
-            "entries_count": len(self.all(case_id, "entries")),
+            "entries_count": entries_count,
         }
 
     def list_cases(self, archived=False):

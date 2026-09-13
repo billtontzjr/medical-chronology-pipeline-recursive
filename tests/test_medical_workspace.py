@@ -620,8 +620,12 @@ def test_companion_failure_keeps_detailed_flagged_draft_available(store):
     assert case["review_count"] == 1
     folder = store.directory(case["id"]) / "output"
     assert (
-        "Draft complete—manual review required"
+        "Draft complete—companion report review required"
         in (folder / "chronology.md").read_text()
+    )
+    assert (
+        "Unresolved source sections are withheld"
+        not in (folder / "chronology.md").read_text()
     )
     assert "unsupported finding" in (folder / "manual_review.md").read_text()
     assert "unavailable" in (folder / "summary.md").read_text()
@@ -1067,3 +1071,42 @@ def test_composite_title_reaches_the_independent_clinical_audit(tmp_path):
     )
     assert len(prompts) == 2
     assert not result["entries"] and result["reviews"]
+
+
+def test_case_list_uses_consolidated_export_count(store):
+    case = create_case(store)
+    for identifier in ("source-entry-one", "source-entry-two"):
+        store.put(case["id"], "entries", identifier, {"id": identifier})
+    assert store.overview(case["id"])["entries_count"] == 2
+    store.put(
+        case["id"],
+        "case",
+        "export",
+        {"version": "example", "entry_ids": ["merged-entry"]},
+    )
+    state = store.sessions.load(case["id"])
+    store.sessions.mark_phase(state, "header", "complete")
+    assert store.list_cases()[0]["entries_count"] == 1
+    store.sessions.mark_phase(state, "header", "in_progress")
+    assert store.overview(case["id"])["entries_count"] == 2
+
+
+def test_rerun_does_not_claim_previous_upload_completed_current_job(store):
+    case, pipeline, calls = prepared_pipeline(store)
+    MedicalRun(store, pipeline, case["id"]).run()
+    original_artifacts = store.all(case["id"], "artifacts")
+    original_calls = dict(calls)
+
+    def pause_after_reset():
+        phases = store.overview(case["id"])["phases"]
+        for name in ("header", "summary", "upload"):
+            assert phases[name]["status"] == "pending"
+            assert not phases[name].get("completed_at")
+        return True
+
+    from src.session_state import PauseRequested
+
+    with pytest.raises(PauseRequested):
+        MedicalRun(store, pipeline, case["id"], stopping=pause_after_reset).run()
+    assert store.all(case["id"], "artifacts") == original_artifacts
+    assert calls == original_calls
