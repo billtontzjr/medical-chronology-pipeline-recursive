@@ -475,6 +475,44 @@ def test_new_validator_rechecks_only_flagged_cached_results(store, monkeypatch):
     assert len(rechecks) == 1
 
 
+@pytest.mark.parametrize("blank", [True, False])
+def test_saved_no_text_page_is_assessed_without_rewriting_ocr_or_original(store, blank):
+    case, pipeline, calls = prepared_pipeline(store)
+    extract = pipeline.ocr_client.extract_text
+
+    def two_pages(*args, **kwargs):
+        result = extract(*args, **kwargs)
+        result['page_count'] = 2
+        result['page_results'].append({'page': 2, 'status': 'no_text'})
+        return result
+
+    pipeline.ocr_client.extract_text = two_pages
+    inspected = []
+    pipeline.ocr_client.inspect_blank_page = lambda path, page: (
+        inspected.append(page) or {'blank': blank, 'method': 'synthetic-blank-assessment'})
+    runner = MedicalRun(store, pipeline, case['id'])
+    doc = runner.inventory()[0]
+    original = store.file(case['id'], 'input', doc['path']).read_bytes()
+    if blank:
+        pages, _ = runner.read_document(doc)
+        assert {p['page'] for p in pages} == {1, 2}
+        assert doc['pages'][1]['status'] == 'blank'
+        assert doc['pages'][1]['blank_assessment']['source_sha256'] == doc['sha256']
+    else:
+        with pytest.raises(EvidenceReview) as error:
+            runner.read_document(doc)
+        assert error.value.kind == 'ocr' and error.value.pages == [2]
+    raw = (runner.path / 'extracted' / 'record.txt').read_bytes()
+    report = json.loads((runner.path / 'extracted' / 'record.ocr.json').read_text())
+    assert report['pages'][1]['status'] == 'no_text'
+    assert report['text_sha256'] == hashlib.sha256(raw).hexdigest()
+    assert store.file(case['id'], 'input', doc['path']).read_bytes() == original
+    assert calls['ocr'] == 1 and inspected == [2]
+    if blank:
+        runner.read_document(doc)
+        assert calls['ocr'] == 1
+
+
 def test_targeted_retry_retains_unrelated_ocr_and_entries(store):
     case, p, calls = prepared_pipeline(store)
     MedicalRun(store, p, case["id"]).run()
@@ -1372,6 +1410,20 @@ def test_patient_columns_do_not_invent_an_identity_mismatch():
     )
     assert not result["entries"]
     assert any(i["kind"] == "patient_identity" for i in result["reviews"])
+
+
+@pytest.mark.parametrize("column", ["Record Id : TEST123", "Record Number: TEST123", "Age / Gender : 46 / M", "Authorization#: TEST123", "Authorization Number: TEST123"])
+def test_patient_name_stops_at_labeled_adjacent_record_column(column):
+    from src.medical_evidence import explicit_patient_names
+
+    text = TEXT + "\nPatient : Alex Jordan Example                 " + column + "\n"
+    assert explicit_patient_names(text)[-1] == "Alex Jordan Example"
+    result = validate_document(response(), [{"page": 1, "text": text}], CASE, MEDICAL_POLICY, DOC)
+    assert result["entries"] and not result["reviews"]
+    wrong = text.replace("Patient : Alex Jordan Example", "Patient : Robin Other")
+    rejected = validate_document(response(), [{"page": 1, "text": wrong}], CASE, MEDICAL_POLICY, DOC)
+    assert not rejected["entries"]
+    assert rejected["reviews"][0]["kind"] == "patient_identity"
 
 
 def test_exclude_document_persists_without_ocr_and_is_reversible(store):
