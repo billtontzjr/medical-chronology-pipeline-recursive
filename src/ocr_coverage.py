@@ -20,7 +20,8 @@ def save_coverage(result, pdf, input_dir, extracted_dir):
               'error_pages': [p['page'] for p in pages if p['status'] == 'error']}
     report['technical_failure'] = bool(report['error_pages'] or not isinstance(total, int) or total < 1
         or len(pages) != total or {p.get('page') for p in pages} != set(range(1, (total or 0) + 1))
-        or any(p.get('status') not in ('text', 'no_text', 'error') for p in pages))
+        or any(p.get('status') not in ('text', 'blank', 'no_text', 'error') for p in pages))
+    report['ocr_protocol'] = result.get('ocr_protocol')
     report['source_sha256'] = hashlib.sha256(Path(pdf).read_bytes()).hexdigest()
     txt = Path(extracted_dir) / Path(pdf).relative_to(input_dir).with_suffix('.txt')
     report['text_sha256'] = hashlib.sha256(txt.read_bytes()).hexdigest() if txt.exists() else None

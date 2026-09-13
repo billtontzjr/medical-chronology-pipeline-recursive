@@ -3,12 +3,12 @@ import re
 from datetime import datetime
 
 
-_SERVICE = r'(?:service|exam(?:ination)?|study|procedure|collection|acquisition)'
+_SERVICE = r'(?:service|exam(?:ination)?|study|procedure|collection|acquisition|visit|referral)'
 _TIME = r'(?:[ \t]*/[ \t]*time)?'
 SERVICE_DATE = re.compile(
     rf'^[ \t]*(?:date{_TIME}[ \t]+of[ \t]+{_SERVICE}|'
     rf'{_SERVICE}[ \t]+date{_TIME}|(?:collected|performed|acquired)(?:[ \t]+on)?|'
-    rf'date{_TIME})(?:[ \t]*:[ \t]*|[ \t]+(?=\S)|[ \t]*$)', re.I | re.M)
+    rf'DOS|DOE|date{_TIME})(?:[ \t]*:[ \t]*|[ \t]+(?=\S)|[ \t]*$)', re.I | re.M)
 WRONG_DATE_ROLE = re.compile(
     r'\b(?:birth|DOB|injury|accident|collision|signed|signature|dictated|'
     r'printed|ordered|reported|report|result)\b', re.I)
@@ -44,13 +44,14 @@ def date_value(field):
     label = SERVICE_DATE.match(field)
     if not label or WRONG_DATE_ROLE.search(field):
         return None
-    value = _DATE_VALUE.fullmatch(field[label.end():].strip())
+    remainder = re.split(r"\s+-\s+(?=[A-Za-z])", field[label.end():].strip(), maxsplit=1)[0]
+    value = _DATE_VALUE.fullmatch(remainder)
     return value.group('date') if value else None
 
 
 def date_fields(unit):
     """Recognize a complete date field on one line or with its value on the next."""
-    lines = unit.splitlines()
+    lines = re.split(r"\n|[ \t]{3,}", unit)
     fields = []
     for index, line in enumerate(lines):
         if not SERVICE_DATE.match(line) or WRONG_DATE_ROLE.search(line):
@@ -79,7 +80,7 @@ def _resolve(value, corroborated):
     return next(iter(matches)) if len(matches) == 1 else None
 
 
-def supports_service_date(quote, date, unit):
+def supports_service_date(quote, date, unit, corroborating_dates=()):
     """Require the exact field and one unambiguous service date on this page.
 
     A short year needs an independent, explicit four-digit service date on the
@@ -92,4 +93,34 @@ def supports_service_date(quote, date, unit):
         return False
     values = [date_value(field) for field in fields]
     corroborated = {date for value in values if value for date in full_dates(value)}
-    return bool(values) and all(_resolve(value, corroborated) == date for value in values)
+    return bool(values) and all((resolve_source_date(value, corroborating_dates) if corroborating_dates else _resolve(value, corroborated)) == date for value in values)
+
+
+def resolve_source_date(value, corroborating_dates):
+    """Expand a short year only from a single corroborated clinical century.
+
+    Corroboration is passed by the medical workspace from previously source-checked
+    encounters, never from filenames, case DOB, the clock, or a model proposal.
+    Requiring a nearby year avoids using recent care to invent a remote historical
+    century. Exact dates and genuine century conflicts retain their meaning.
+    """
+    if value is None:
+        return None
+    full = full_dates(value)
+    if len(full) == 1:
+        return next(iter(full))
+    short = _SHORT_DATE.fullmatch(value)
+    if not short:
+        return None
+    month, day, year = int(short[1]), int(short[3]), int(short[4])
+    possible = set()
+    for other in corroborating_dates:
+        for parsed in full_dates(other):
+            known = int(parsed[-4:])
+            candidate = known // 100 * 100 + year
+            if abs(candidate - known) <= 10:
+                try:
+                    possible.add(datetime(candidate, month, day).strftime('%m/%d/%Y'))
+                except ValueError:
+                    pass
+    return next(iter(possible)) if len(possible) == 1 else None

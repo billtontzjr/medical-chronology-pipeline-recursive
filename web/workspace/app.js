@@ -125,16 +125,16 @@ function casesView() {
         "Review and export status stay separate",
       ],
     ],
-  )}<div class="sectionbar"><h2>${state.archived ? "Archived cases" : "Cases"}</h2><input class="search" id="case-search" aria-label="Search cases" placeholder="Search by patient or case name…" value="${esc(state.query)}"></div>${list.length ? `<div class="tablewrap"><table><thead><tr><th>Patient / case</th><th>Progress</th><th>Review</th><th class="case-detail">Records</th><th></th></tr></thead><tbody>${list.map((c) => `<tr><td><button class="casename" ${state.archived ? "disabled" : ""} data-action="open" data-id="${esc(c.id)}">${esc(c.name)}</button><small>${c.legacy ? "Legacy run · original rules preserved" : "Medical records only"}${c.doi ? " · Injury " + esc(c.doi) : ""}</small></td><td>${caseStatusBadge(c)}<div class="progress" aria-hidden="true"><span style="width:${c.status === "complete" ? 100 : Math.min(95, (Object.values(c.phases || {}).filter((p) => p.status === "complete").length / 6) * 100)}%"></span></div></td><td>${c.review_count ? badge(c.review_count + " to review", "amber") : badge(c.status === "complete" ? "Human review required" : "No open questions")}</td><td class="case-detail">${esc(c.documents_count ?? "—")}<small>${c.entries_count || 0} chronology entries</small></td><td><button data-action="${state.archived ? "restore" : "open"}" data-id="${esc(c.id)}">${state.archived ? "Restore" : "Open →"}</button></td></tr>`).join("")}</tbody></table></div>` : `<div class="empty"><h2>${state.query ? "No matching cases" : state.archived ? "No archived cases" : "Your next chronology starts here"}</h2><p>${state.query ? "Try another patient or case name." : "Add a Dropbox records folder to begin."}</p></div>`}`;
+  )}<div class="sectionbar"><h2>${state.archived ? "Archived cases" : "Cases"}</h2><input class="search" id="case-search" aria-label="Search cases" placeholder="Search by patient or case name…" value="${esc(state.query)}"></div>${list.length ? `<div class="tablewrap"><table><thead><tr><th>Patient / case</th><th>Progress</th><th>Review</th><th class="case-detail">Records</th><th></th></tr></thead><tbody>${list.map((c) => `<tr><td><button class="casename" ${state.archived ? "disabled" : ""} data-action="open" data-id="${esc(c.id)}">${esc(c.name)}</button><small>${c.legacy ? "Legacy run · original rules preserved" : "Medical records only"}${c.doi ? " · Injury " + esc(c.doi) : ""}</small></td><td>${caseStatusBadge(c)}<div class="progress" aria-hidden="true"><span style="width:${c.status === "complete" ? 100 : Math.min(95, (Object.values(c.phases || {}).filter((p) => p.status === "complete").length / 6) * 100)}%"></span></div></td><td>${c.review_count ? badge((c.review_document_count ?? c.review_count) + " to review", "amber") : badge(c.status === "complete" ? "Human review required" : "No open questions")}</td><td class="case-detail">${esc(c.documents_count ?? "—")}<small>${c.entries_count || 0} chronology entries</small></td><td><button data-action="${state.archived ? "restore" : "open"}" data-id="${esc(c.id)}">${state.archived ? "Restore" : "Open →"}</button></td></tr>`).join("")}</tbody></table></div>` : `<div class="empty"><h2>${state.query ? "No matching cases" : state.archived ? "No archived cases" : "Your next chronology starts here"}</h2><p>${state.query ? "Try another patient or case name." : "Add a Dropbox records folder to begin."}</p></div>`}`;
 }
 function caseView() {
   const c = state.detail;
-  return `<button class="quiet back" data-action="cases">← All cases</button><div class="pagehead"><div><p class="eyebrow">${c.legacy ? "LEGACY CASE" : "MEDICAL RECORDS CHRONOLOGY"}</p><h1>${esc(c.name)}</h1><p class="muted small">${c.dob ? "DOB " + esc(c.dob) + " · " : ""}${c.doi ? "Injury " + esc(c.doi) + " · " : ""}${c.documents.length} original records</p></div><div class="actions">${caseStatusBadge(c)}<button data-action="archive" ${c.job && ["queued", "running"].includes(c.job.status) ? "disabled" : ""}>Archive</button>${!c.legacy ? `<button class="primary" data-action="${c.job && ["queued", "running"].includes(c.job.status) ? "pause" : "run"}">${c.job && ["queued", "running"].includes(c.job.status) ? "Pause safely" : c.status === "pending" ? "Start processing" : "Run / Resume"}</button>` : ""}</div></div>${c.legacy ? '<div class="callout"><div><strong>Original run preserved</strong><p>This case keeps its historical scope and checkpoints. Use the legacy workspace to continue it; new cases use the medical-only workflow.</p></div><a class="button" href="/?legacy=1&session_id=' + encodeURIComponent(c.id) + '">Open legacy run</a></div>' : ""}<div class="tabs" role="tablist" aria-label="Case sections">${["Overview", "Records", "Chronology", "Review", "Exports"].map((t) => `<button role="tab" aria-selected="${state.tab === t}" class="${state.tab === t ? "active" : ""}" data-action="tab" data-tab="${t}">${t}${t === "Review" && c.review_count ? `<span class="count">${c.review_count}</span>` : ""}</button>`).join("")}</div><section role="tabpanel" aria-label="${state.tab}">${{ Overview: overview, Records: records, Chronology: chronology, Review: review, Exports: exportsView }[state.tab]()}</section>`;
+  return `<button class="quiet back" data-action="cases">← All cases</button><div class="pagehead"><div><p class="eyebrow">${c.legacy ? "LEGACY CASE" : "MEDICAL RECORDS CHRONOLOGY"}</p><h1>${esc(c.name)}</h1><p class="muted small">${c.dob ? "DOB " + esc(c.dob) + " · " : ""}${c.doi ? "Injury " + esc(c.doi) + " · " : ""}${c.documents.length} original records</p></div><div class="actions">${caseStatusBadge(c)}<button data-action="archive" ${c.job && ["queued", "running"].includes(c.job.status) ? "disabled" : ""}>Archive</button>${!c.legacy ? `<button class="primary" data-action="${c.job && ["queued", "running"].includes(c.job.status) ? "pause" : "run"}">${c.job && ["queued", "running"].includes(c.job.status) ? "Pause safely" : c.status === "pending" ? "Start processing" : "Run / Resume"}</button>` : ""}</div></div>${c.legacy ? '<div class="callout"><div><strong>Original run preserved</strong><p>This case keeps its historical scope and checkpoints. Use the legacy workspace to continue it; new cases use the medical-only workflow.</p></div><a class="button" href="/?legacy=1&session_id=' + encodeURIComponent(c.id) + '">Open legacy run</a></div>' : ""}<div class="tabs" role="tablist" aria-label="Case sections">${["Overview", "Records", "Chronology", "Review", "Exports"].map((t) => `<button role="tab" aria-selected="${state.tab === t}" class="${state.tab === t ? "active" : ""}" data-action="tab" data-tab="${t}">${t}${t === "Review" && c.review_count ? `<span class="count">${c.review_document_count ?? c.review_count}</span>` : ""}</button>`).join("")}</div><section role="tabpanel" aria-label="${state.tab}">${{ Overview: overview, Records: records, Chronology: chronology, Review: review, Exports: exportsView }[state.tab]()}</section>`;
 }
 function overview() {
   const c = state.detail,
     open = c.issues.filter((i) => ["open", "deferred"].includes(i.status));
-  return `${open.length ? `<div class="callout warning"><div aria-hidden="true">◉</div><div><strong>${open.length} source question${open.length === 1 ? "" : "s"} to review</strong><p>Unaffected medical records can continue. Deferred items remain visible until your team resolves them.</p></div><button data-action="tab" data-tab="Review">Review now →</button></div>` : ""}${c.last_error ? `<div class="callout warning"><div><strong>Processing needs attention</strong><p>${esc(c.last_error)}</p></div></div>` : ""}${metrics(
+  return `${open.length ? `<div class="callout warning"><div aria-hidden="true">◉</div><div><strong>${c.review_document_count ?? open.length} document${(c.review_document_count ?? open.length) === 1 ? "" : "s"} to review</strong><p>Unaffected medical records can continue. Deferred items remain visible until your team resolves them.</p></div><button data-action="tab" data-tab="Review">Review now →</button></div>` : ""}${c.last_error ? `<div class="callout warning"><div><strong>Processing needs attention</strong><p>${esc(c.last_error)}</p></div></div>` : ""}${metrics(
     [
       [c.documents.length, "Original records", "Read-only source files"],
       [
@@ -147,7 +147,7 @@ function overview() {
         "Excluded records",
         "Reasons remain available",
       ],
-      [open.length, "Review questions", "Named decisions saved in history"],
+      [c.review_document_count ?? open.length, "Documents to review", open.length + " related source questions"],
     ],
   )}<div class="two"><div class="card"><h2>Processing progress</h2><p class="muted small">${esc(c.job?.data?.message || "Saved progress is available whenever you return.")}</p>${c.job?.heartbeat ? `<p class="muted small">Worker last checked in ${new Date(c.job.heartbeat * 1000).toLocaleString()}.</p>` : ""}<ol class="steps">${[
     ["download", "Collect original records"],
@@ -204,9 +204,17 @@ function chronology() {
   const c = state.detail;
   return `<div class="sectionbar"><div><h2>Chronology</h2><p class="muted small">Read the narrative and open its supporting original pages.</p></div><button data-action="tab" data-tab="Exports">Word & exports →</button></div>${c.review_count ? '<div class="callout warning"><div><strong>Draft · manual review required</strong><p>Open questions and any withheld material are listed in Review. Check their scope before final use.</p></div></div>' : ""}<div class="workspace"><div>${c.entries.map((e) => `<article class="entry ${state.selected?.id === e.id ? "selected" : ""}"><div class="entryhead"><span class="entrydate">${esc(e.date || "Date needs review")}</span>${badge({ clinical_care: "Medical encounter", medical_evaluation: "Medical evaluation", diagnostic_test: "Diagnostic report", medical_billing: "Billing record" }[e.record_type] || "Medical encounter", "teal")}</div><p>${esc(e.text)}</p>${e.evidence?.length ? `<details class="citations"><summary>Source pages (${e.evidence.length})</summary>${e.evidence.map((r, n) => `<button data-action="citation" data-id="${esc(e.id)}" data-ref="${n}">${esc(c.documents.find((d) => d.id === r.document_id)?.path || "Source")} · PDF page ${r.page}</button>`).join("")}</details>` : ""}<div class="entryfoot"><span>${e.evidence?.length ? e.evidence.length + " source references" : "Legacy provenance not established"}</span><button data-action="entry" data-id="${esc(e.id)}" ${e.document_id ? "" : "disabled"}>Check original →</button></div></article>`).join("") || '<div class="empty"><h2>No chronology entries yet</h2><p>Eligible medical records appear here as processing completes.</p></div>'}</div>${sourcePanel()}</div>`;
 }
+const decisionLabels = {rerun_include: "Rerun and include after source checks", exclude: "Excluded", retry: "Retry OCR", resolve: "Source correction saved", include_reviewed: "Human-reviewed paragraph saved", defer: "Deferred", restore: "Reopened", reconsider: "Reconsider exclusion", keep_distinct: "Keep distinct"};
 function review() {
   const c = state.detail;
-  return `<div class="sectionbar"><div><h2>Review questions</h2><p class="muted small">Several questions may refer to one document. Check its original and choose what happens next; the document decision covers its related questions.</p></div></div><div class="workspace"><div>${c.issues.map((i) => `<article class="issue"><div class="entryhead">${statusBadge(i.status)}<span class="small muted">${esc(i.kind.replaceAll("_", " "))}</span></div><h3>${esc(i.title || i.kind)}</h3><p>${esc(i.reason)}</p>${i.proposed_entry?.text ? `<details><summary>Withheld proposed entry</summary><p>${esc(i.proposed_entry.text)}</p></details>` : ""}${i.proposed_entries ? `<details><summary>Entries awaiting consolidation</summary>${i.proposed_entries.map((e) => `<p>${esc(e.text)}</p>`).join("")}</details>` : ""}<p class="small">${esc(c.documents.find((d) => d.id === i.document_id)?.path || "Case review")}${i.page ? " · PDF page " + i.page : ""}</p><div class="actions">${!i.document_id ? '<button data-action="export">Retry companion reports</button>' : ""}<button data-action="issue-source" data-id="${esc(i.id)}" ${i.document_id ? "" : "disabled"}>Check original</button>${i.compare_document_id ? `<button data-action="issue-compare" data-id="${esc(i.id)}">Compare both</button>` : ""}<button class="primary" data-action="review" data-id="${esc(i.id)}" ${i.document_id ? "" : "disabled"}>${i.status === "resolved" ? "Review decision" : "Record decision"}</button></div></article>`).join("") || '<div class="empty"><h2>No open review questions</h2><p>Generated content still requires your team’s source review before final use.</p></div>'}<details><summary>Decision history (${c.history.length})</summary>${c.history.map((h) => `<div class="entry"><strong>${esc(h.reviewer)} · ${esc(h.action)}</strong><p>${esc(h.reason)}</p><small>${new Date(h.created * 1000).toLocaleString()}</small></div>`).join("")}</details></div>${sourcePanel()}</div>`;
+  const grouped = new Map();
+  for (const question of c.issues) {
+    const key = question.document_id || question.id;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(question);
+  }
+  const reviewGroups = [...grouped.values()];
+  return `<div class="sectionbar"><div><h2>Review questions</h2><p class="muted small">Several questions may refer to one document. Check its original and choose what happens next; the document decision covers its related questions.</p></div></div><div class="workspace"><div>${reviewGroups.map((items) => { const i = items.find(q => q.status !== "resolved") || items[0]; return `<article class="issue"><div class="entryhead">${statusBadge(i.status)}<span class="small muted">${esc(i.kind.replaceAll("_", " "))}</span></div><h3>${esc(i.title || i.kind)}</h3><p>${esc(i.reason)}</p>${i.decision ? `<p class="small">Saved: ${esc(decisionLabels[i.decision.action] || i.decision.action)} · ${esc(i.decision.reviewer)}</p>` : ""}${items.length > 1 ? `<details><summary>${items.length - 1} related questions for this document</summary>${items.filter(q => q.id !== i.id).map(q => `<p>${esc(q.kind)} · PDF page ${q.page || "—"}: ${esc(q.reason)}</p><button data-action="issue-source" data-id="${esc(q.id)}">Check this page</button>`).join("")}</details>` : ""}${i.proposed_entry?.text ? `<details><summary>Withheld proposed entry</summary><p>${esc(i.proposed_entry.text)}</p></details>` : ""}${i.proposed_entries ? `<details><summary>Entries awaiting consolidation</summary>${i.proposed_entries.map((e) => `<p>${esc(e.text)}</p>`).join("")}</details>` : ""}<p class="small">${esc(c.documents.find((d) => d.id === i.document_id)?.path || "Case review")}${i.page ? " · PDF page " + i.page : ""}</p><div class="actions">${!i.document_id ? '<button data-action="export">Retry companion reports</button>' : ""}<button data-action="issue-source" data-id="${esc(i.id)}" ${i.document_id ? "" : "disabled"}>Check original</button>${i.compare_document_id ? `<button data-action="issue-compare" data-id="${esc(i.id)}">Compare both</button>` : ""}<button class="primary" data-action="review" data-id="${esc(i.id)}" ${i.document_id ? "" : "disabled"}>${i.status === "resolved" ? "Review decision" : "Record decision"}</button></div></article>`; }).join("") || '<div class="empty"><h2>No open review questions</h2><p>Generated content still requires your team’s source review before final use.</p></div>'}<details><summary>Decision history (${c.history.length})</summary>${c.history.map((h) => `<div class="entry"><strong>${esc(h.reviewer)} · ${esc(decisionLabels[h.action] || h.action)}</strong><p>${esc(h.reason)}</p><small>${new Date(h.created * 1000).toLocaleString()}</small></div>`).join("")}</details></div>${sourcePanel()}</div>`;
 }
 function exportsView() {
   const c = state.detail;
@@ -285,6 +293,8 @@ async function showDecision(target, action) {
   render();
   const f = $("#decision-form");
   f.reset();
+  delete f.dataset.requestId;
+  delete f.dataset.requestSignature;
   $("#advanced-review-tools").open = false;
   f.elements.target.value = target.id;
   if (target.page) f.elements.page.value = target.page;
@@ -483,6 +493,10 @@ function updateDecisionAction() {
   const f = $("#decision-form");
   f.elements.action.required = !f.elements.advanced_action.value;
   f.elements.reason.required = !!f.elements.advanced_action.value;
+  const doc = state.detail?.documents.find(d => d.id === (state.selected?.document_id || state.selected?.id));
+  if (doc) $("#decision-scope").textContent = f.elements.advanced_action.value === "include_reviewed"
+    ? "Applies only to the physical PDF page identified below in " + doc.path + ". Other unread pages remain flagged."
+    : "Applies to the entire document: " + doc.path + ". Original files and decision history are preserved.";
 }
 $("#decision-form").addEventListener("change", (e) => {
   const f = e.currentTarget;
@@ -495,19 +509,38 @@ $("#decision-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = e.target,
     v = Object.fromEntries(new FormData(f));
+  if (f.dataset.saving === "true") return;
+  const payload = {
+    ...v,
+    action: v.advanced_action || v.action,
+    page: v.page ? Number(v.page) : null,
+  };
+  const signature = JSON.stringify(payload);
+  if (f.dataset.requestSignature !== signature) {
+    f.dataset.requestId = crypto.randomUUID();
+    f.dataset.requestSignature = signature;
+  }
+  payload.request_id = f.dataset.requestId;
+  f.dataset.saving = "true";
+  const submit = f.querySelector('button[type="submit"]');
+  if (submit) submit.disabled = true;
+  f.querySelector(".form-error").textContent = "";
   try {
-    await api("/cases/" + encodeURIComponent(state.detail.id) + "/review", {
-      ...v,
-      action: v.advanced_action || v.action,
-      page: v.page ? Number(v.page) : null,
-    });
+    await api("/cases/" + encodeURIComponent(state.detail.id) + "/review", payload);
     $("#decision-dialog").close();
-    await openCase(state.detail.id);
     toast(
       "Decision saved. Use Run / Resume after your review to update outputs.",
     );
+    try {
+      await openCase(state.detail.id);
+    } catch (err) {
+      toast("Decision saved. Reload the case to see its updated review history.");
+    }
   } catch (err) {
     f.querySelector(".form-error").textContent = err.message;
+  } finally {
+    f.dataset.saving = "false";
+    if (submit) submit.disabled = false;
   }
 });
 async function refresh() {
