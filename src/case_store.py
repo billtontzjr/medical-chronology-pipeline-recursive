@@ -1,6 +1,7 @@
 """Transactional workspace metadata beside, never instead of, original session files."""
 
 import contextlib
+from contextvars import ContextVar
 import hashlib
 import json
 import os
@@ -20,7 +21,7 @@ MEDICAL_POLICY = {
     "depositions": False,
     "billing_only": False,
     "medical_expert_reports": True,
-    "template": "classic",
+    "template": "plain",
 }
 
 
@@ -32,6 +33,7 @@ def digest(value):
 
 class CaseStore:
     def __init__(self, base_dir):
+        self._transaction_db = ContextVar("case_store_transaction", default=None)
         self.sessions = SessionStore(str(base_dir))
         self.root = self.sessions.sessions_root.parent
         self.sessions.sessions_root = self.root / "medical-sessions"
@@ -64,6 +66,10 @@ class CaseStore:
 
     @contextlib.contextmanager
     def connect(self):
+        active = self._transaction_db.get()
+        if active is not None:
+            yield active
+            return
         db = sqlite3.connect(self.path, timeout=20)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA journal_mode=WAL")
@@ -76,6 +82,27 @@ class CaseStore:
             raise
         finally:
             db.close()
+
+    @contextlib.contextmanager
+    def review_transaction(self, case_id):
+        """Commit review metadata together; restore phase state on a failed save.
+
+        Called under the case lock. All nested synchronous store operations use
+        this connection, including history, overrides and document invalidation.
+        """
+        state_path = self.directory(case_id) / "state.json"
+        original_state = json.loads(state_path.read_text())
+        try:
+            with self.connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                token = self._transaction_db.set(db)
+                try:
+                    yield
+                finally:
+                    self._transaction_db.reset(token)
+        except BaseException:
+            atomic_json(state_path, original_state)
+            raise
 
     def directory(self, case_id, *, archived=False):
         case_id = validate_session_id(case_id)
@@ -173,6 +200,7 @@ class CaseStore:
             "legacy": policy is None,
             "archived": archived,
             "review_count": sum(i["status"] in ("open", "deferred") for i in issues),
+            "review_document_count": len({i.get("document_id") or i["id"] for i in issues if i["status"] in ("open", "deferred")}),
             "review_status": (
                 "needs_review"
                 if any(i["status"] in ("open", "deferred") for i in issues)

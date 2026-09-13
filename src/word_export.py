@@ -85,7 +85,7 @@ def chronology_docx(markdown: str, *, separate_billing: bool = False, records=No
             line = re.sub(r'^#{1,6}\s+', '', line)
             for piece in re.split(r'(\*\*[^*]+\*\*)', _display_text(line)):
                 if piece.startswith('**') and piece.endswith('**'):
-                    p.add_run(piece[2:-2]).bold = True
+                    p.add_run(piece[2:-2]).bold = template != "plain"
                 else:
                     p.add_run(piece)
     for block in clinical:

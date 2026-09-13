@@ -5,6 +5,7 @@ import logging
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
 from src.ocr_client import OCRClient
 from src.ocr_coverage import collect_coverage, save_coverage
@@ -34,10 +35,10 @@ def confirm_inventory(pipeline, state):
 
 def test_ocr_distinguishes_blank_from_failed_page(monkeypatch):
     monkeypatch.setattr('pdf2image.pdf2image.pdfinfo_from_path', lambda _: {'Pages': 4})
-    monkeypatch.setattr('src.ocr_client.convert_from_path', lambda *a, **k: [object()])
+    monkeypatch.setattr('src.ocr_client.convert_from_path', lambda *a, **k: [Image.new("L", (20, 20), 128)])
     client = OCRClient('not-a-real-key')
     client._image_to_base64 = lambda _: 'synthetic'
-    replies = iter([{'success': True, 'text': 'Record'}, {'success': True, 'text': ''},
+    replies = iter([{'success': True, 'text': 'Record'}, {'success': True, 'text': ''}, {'success': True, 'text': ''},
                     {'success': False, 'text': '', 'error': 'Service failure'},
                     {'success': True, 'text': 'Final page'}])
     client._extract_text_from_image = lambda *a, **k: next(replies)
@@ -54,7 +55,7 @@ def test_expected_page_conversion_failure_does_not_truncate_later_pages(monkeypa
     def convert(*a, **kw):
         if kw['first_page'] == 2:
             raise RuntimeError('invalid page conversion')
-        return [object()]
+        return [Image.new("L", (20, 20), 128)]
     monkeypatch.setattr('src.ocr_client.convert_from_path', convert)
     client = OCRClient('not-a-real-key')
     client._image_to_base64 = lambda _: 'synthetic'

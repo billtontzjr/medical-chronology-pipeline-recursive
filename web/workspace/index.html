@@ -55,14 +55,8 @@
             enclosed with legal documents remain eligible.
           </p>
           <label
-            >Word template<select name="template">
-              <option value="underlined">
-                Medical Records Summary · underlined title
-              </option>
-              <option value="classic">Medical Records Summary · classic</option>
-              <option value="plain">
-                Medical Records Summary · plain heading
-              </option>
+            >Word format<select name="template">
+              <option value="plain">Medical Records Summary · standard format</option>
             </select></label
           ><label
             >Chronology model<select name="model">
@@ -139,6 +133,7 @@
             >Advanced action<select name="advanced_action">
               <option value="">Use the choice above</option>
               <option value="retry">Retry OCR extraction</option>
+              <option value="include_reviewed">Include a paragraph I verified from the original</option>
               <option value="resolve">
                 Resolve with a source-backed correction
               </option>
@@ -154,15 +149,23 @@
           <label
             >Physical PDF page<input name="page" type="number" min="1" /></label
           ><label
-            >Corrected OCR text for this page<textarea
+            >Replace this page’s OCR text (optional)<textarea
               name="corrected_text"
               rows="7"
             ></textarea>
           </label>
           <p class="hint">
-            Corrections remain attached to this exact source version. Original
-            files are never overwritten.
+            This replaces the entire page’s extracted text on the next run. Enter all readable text from that page, not just one corrected word. Leave it blank for a name-spacing or date-validation issue. Original files and the prior extraction are preserved.
           </p>
+        </details>
+        <details>
+          <summary>Manually reviewed chronology entry</summary>
+          <p class="hint">Choose “Include a paragraph I verified from the original” above and identify the physical PDF page. This replaces generated content linked to that page only. Other unread pages remain flagged. Enter only what you personally verified; missing provider or facility can use the placeholders below. This is saved as a named human review, not an AI verification.</p>
+          <label>Source date<input name="reviewed_date" placeholder="MM/DD/YYYY or Undated" /></label>
+          <label>Provider and credentials<input name="reviewed_provider" placeholder="Provider not documented" /></label>
+          <label>Facility<input name="reviewed_facility" placeholder="Facility not documented" /></label>
+          <label>Document type<input name="reviewed_service" placeholder="Chart Notes" /></label>
+          <label>Source-only paragraph<textarea name="reviewed_body" rows="6" placeholder="Include only readable details. When appropriate, end with (Handwritten notes are illegible)."></textarea></label>
         </details>
         <div class="form-error" role="alert"></div>
         <div class="dialog-actions">

@@ -123,7 +123,7 @@ def render_diagnostic(entry, documents):
         for _, unit in page_units(content):
             normalized = _normalize(unit)
             checks = {
-                'service_date_not_established': supports_service_date(date_quote, date, unit),
+                'service_date_not_established': supports_service_date(date_quote, date, unit, corroborating_dates=document.get("corroborating_dates", ())),
                 'study_not_on_result_page': _normalize(result['study']) in normalized,
                 'result_not_complete_on_page': _normalize(quote) in {
                     _normalize(section) for section in _result_sections(unit)},

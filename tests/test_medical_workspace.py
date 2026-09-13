@@ -86,7 +86,7 @@ def test_entries_retain_original_page_and_source_version():
     )
     assert entry["service_dates"] == ["02/05/2026"]
     assert entry["text"].startswith(
-        "02/05/2026. Example Clinic. Avery Example, MD. Office evaluation."
+        "02/05/2026. Avery Example, MD. Example Clinic. Office evaluation."
     )
     assert "Visit Type:" not in entry["text"]
 
@@ -845,7 +845,7 @@ def test_companion_failure_keeps_detailed_flagged_draft_available(store):
     folder = store.directory(case["id"]) / "output"
     assert (
         "Draft complete—companion report review required"
-        in (folder / "chronology.md").read_text()
+        in (folder / "manual_review.md").read_text()
     )
     assert (
         "Unresolved source sections are withheld"
@@ -921,96 +921,25 @@ def test_active_case_lock_preserves_state_when_duplicate_worker_attempts(store):
     assert store.job(case["id"])["status"] == "paused"
 
 
-@pytest.mark.parametrize(
-    "merge_mode", ["valid", "format", "wrong_provider", "wrong_date"]
-)
-def test_same_day_procedures_merge_all_sources_but_keep_other_provider(
-    store, merge_mode
-):
+def test_separate_same_day_source_documents_remain_separate(store):
     case, p, calls = prepared_pipeline(store)
     run = MedicalRun(store, p, case["id"])
     doc = run.inventory()[0]
-    entry = validate_document(response(), PAGES, CASE, MEDICAL_POLICY, doc)["entries"][
-        0
-    ]
-    second = {
-        **copy.deepcopy(entry),
-        "id": "second-procedure",
-        "provider": "Avery Example, M.D.",
-        "text": "02/05/2026. Example Clinic. Avery Example, M.D. Cervical injection. History: Persistent symptoms. Procedure: Left C5-6 injection, tolerated without immediate complication.",
-    }
-    second["evidence"] = [
-        {
-            **entry["evidence"][0],
-            "quote": "Left C5-6 injection, tolerated without immediate complication.",
-        }
-    ]
-    third = {
-        **copy.deepcopy(entry),
-        "id": "other-provider",
-        "provider": "Riley Example, DPT",
-    }
-    third["text"] = third["text"].replace("Avery Example, MD", "Riley Example, DPT")
-    store.replace_document_result(case["id"], doc, [entry, second, third], [])
-    merged_text = "02/05/2026. Example Clinic. Avery Example, MD. Evaluation and cervical injection. History: Neck pain without arm weakness. Examination: Upper extremity strength 5/5. Impression: Cervical strain. Procedure: Left C5-6 injection, tolerated without immediate complication. Plan: Physical therapy and follow-up in four weeks."
-
-    merge_calls = []
-
-    def model(prompt, **kw):
-        if prompt.startswith("Consolidate these source-checked"):
-            inputs = json.loads(
-                prompt[prompt.index("\n[") + 1 :].split("\nFORMAT CORRECTION:")[0]
-            )
-            assert len(inputs) == 2
-            merge_calls.append(prompt)
-            proposed = merged_text
-            if merge_mode == "format" and len(merge_calls) == 1:
-                proposed = merged_text.replace(
-                    "02/05/2026. Example Clinic. Avery Example, MD.",
-                    "02/05/2026 — Avery Example, MD, Example Clinic:",
-                )
-            if merge_mode == "wrong_provider":
-                proposed = merged_text.replace(
-                    "Avery Example, MD", "Jordan Different, MD"
-                )
-            if merge_mode == "wrong_date":
-                proposed = merged_text.replace("02/05/2026.", "02/06/2026.", 1)
-            return json.dumps(
-                {"text": proposed, "covered_ids": [e["id"] for e in inputs]}
-            )
-        if prompt.startswith("Check this merged"):
-            return json.dumps(
-                {
-                    "supported": True,
-                    "complete": True,
-                    "reason": "Both clinical records and the distinct injection details are retained.",
-                }
-            )
-        pytest.fail("Unexpected model call")
-
-    p.chronology_agent._call_api_with_retry = model
-    result = run.merged_entries()
-    assert len(merge_calls) == (2 if merge_mode == "format" else 1)
-    if merge_mode.startswith("wrong_"):
-        assert len(result) == 1 and result[0]["id"] == third["id"]
-        assert any(
-            i["kind"] == "same_day_merge" for i in store.all(case["id"], "issues")
-        )
-        return
-    assert len(result) == 2
-    merged = next(e for e in result if "merged_entry_ids" in e)
-    assert set(merged["merged_entry_ids"]) == {entry["id"], second["id"]}
-    assert len(merged["evidence"]) == 2 and "Left C5-6 injection" in merged["text"]
-    p.chronology_agent._call_api_with_retry = lambda *a, **k: pytest.fail(
-        "Cached merge must survive restart"
-    )
-    assert MedicalRun(store, p, case["id"]).merged_entries() == result
+    first = validate_document(response(), PAGES, CASE, MEDICAL_POLICY, doc)["entries"][0]
+    second = {**copy.deepcopy(first), "id": "procedure", "document_id": "procedure-document", "service_name": "Procedure Report", "text": "02/05/2026. Avery Example, MD. Example Clinic. Procedure Report. Procedure Performed: Left C5-6 injection."}
+    store.replace_document_result(case["id"], doc, [first, second], [])
+    p.chronology_agent._call_api_with_retry = lambda *a, **k: pytest.fail("Separate documents must not be merged by a model")
+    entries = run.merged_entries()
+    assert [e["id"] for e in entries] == [first["id"], "procedure"]
+    assert entries[1]["text"] == second["text"]
+    assert not any(i["kind"] == "same_day_merge" for i in store.all(case["id"], "issues"))
 
 
 def test_grouped_therapy_dates_all_remain_source_checked():
     data = response()
     record = data["sections"][0]["entries"][0]
-    source = TEXT + "\nDate of service: 02/09/2026\nTreatment: Continued exercises."
+    record["service_name"] = "Physical therapy"
+    source = TEXT + "\nPhysical therapy\nDate of service: 02/09/2026\nTreatment: Continued exercises."
     record["service_dates"] = ["02/05/2026", "02/09/2026"]
     record["date_evidence"].append(
         {"date": "02/09/2026", "page": 1, "quote": "Date of service: 02/09/2026"}
@@ -1019,7 +948,7 @@ def test_grouped_therapy_dates_all_remain_source_checked():
         data, [{"page": 1, "text": source}], CASE, MEDICAL_POLICY, DOC
     )
     assert result["entries"][0]["service_dates"] == ["02/05/2026", "02/09/2026"]
-    assert "Service dates: 02/05/2026, 02/09/2026." in result["entries"][0]["text"]
+    assert "Patient attended sessions on 02/05/2026 and 02/09/2026." in result["entries"][0]["text"]
     record["date_evidence"].pop()
     with pytest.raises(ValueError, match="every service date"):
         validate_document(
@@ -1139,6 +1068,8 @@ def test_grouped_therapy_accepts_discrete_dates_in_one_explicit_field(label):
     entry["date_evidence"] = [
         {"date": date, "page": 1, "quote": field} for date in dates
     ]
+    entry["service_name"] = "Physical therapy"
+    text += "\nPhysical therapy"
     entry["evidence"] = [{"page": 1, "quote": text}]
     result = validate_document(
         data, [{"page": 1, "text": text}], CASE, MEDICAL_POLICY, DOC
@@ -1441,3 +1372,221 @@ def test_exclusion_cannot_hide_a_changed_original(store):
     (store.directory(cid) / "input" / "record.pdf").write_bytes(b"changed")
     with pytest.raises(ValueError, match="different source version"):
         MedicalRun(store, pipeline, cid).generate_document(doc)
+
+
+@pytest.mark.parametrize("action", ["retry", "rerun_include", "exclude", "defer"])
+def test_review_save_preserves_case_level_issue(store, action):
+    from src.medical_run import issue_for
+
+    case, pipeline, _ = prepared_pipeline(store)
+    cid = case["id"]
+    MedicalRun(store, pipeline, cid).run()
+    doc = store.all(cid, "documents")[0]
+    issue = issue_for(doc, "coverage", "Check this source", [1])
+    companion = {"id": "companion-report", "kind": "companion_report", "status": "open"}
+    store.put(cid, "issues", issue["id"], issue)
+    store.put(cid, "issues", companion["id"], companion)
+    event = review_source(store, cid, {
+        "target": issue["id"], "fingerprint": issue["fingerprint"],
+        "action": action, "reviewer": "Test Reviewer", "reason": "Checked original.",
+    })
+    assert store.get(cid, "issues", companion["id"]) == companion
+    assert store.history(cid) == [event]
+    saved = store.get(cid, "document_history", doc["id"] + "-" + event["id"])
+    assert saved["entries"] and saved["issues"] == [issue]
+    assert store.get(cid, "overrides", doc["id"])["revision"] == event["id"]
+
+
+@pytest.mark.parametrize("failure_stage", ["history", "phase_state"])
+def test_failed_review_save_rolls_back_every_change(store, monkeypatch, failure_stage):
+    case, pipeline, _ = prepared_pipeline(store)
+    cid = case["id"]
+    MedicalRun(store, pipeline, cid).run()
+    doc = store.all(cid, "documents")[0]
+    kinds = ["documents", "entries", "issues", "overrides", "document_history"]
+    before = {kind: store.all(cid, kind) for kind in kinds}
+    state_path = store.directory(cid) / "state.json"
+    original_state = json.loads(state_path.read_text())
+    if failure_stage == "history":
+        put = store.put
+        def fail_history(case_id, kind, *args, **kwargs):
+            if kind == "document_history":
+                raise RuntimeError("Synthetic history failure")
+            return put(case_id, kind, *args, **kwargs)
+        monkeypatch.setattr(store, "put", fail_history)
+    else:
+        save = store.sessions.save
+        def fail_after_state_write(state):
+            save(state)
+            raise RuntimeError("Synthetic phase state failure")
+        monkeypatch.setattr(store.sessions, "save", fail_after_state_write)
+    with pytest.raises(RuntimeError, match="Synthetic"):
+        review_source(store, cid, {
+            "target": doc["id"], "fingerprint": doc["sha256"],
+            "action": "exclude", "reviewer": "Test Reviewer",
+        })
+    assert {kind: store.all(cid, kind) for kind in kinds} == before
+    assert not store.history(cid)
+    assert json.loads(state_path.read_text()) == original_state
+
+
+def test_review_request_retry_returns_saved_decision_once(store):
+    case, pipeline, _ = prepared_pipeline(store)
+    cid = case["id"]
+    MedicalRun(store, pipeline, cid).run()
+    doc = store.all(cid, "documents")[0]
+    request = {
+        "target": doc["id"], "fingerprint": doc["sha256"],
+        "action": "exclude", "reviewer": "Test Reviewer", "request_id": "same-attempt",
+    }
+    first = review_source(store, cid, request)
+    assert review_source(store, cid, request) == first
+    assert store.history(cid) == [first]
+    assert len(store.all(cid, "document_history")) == 1
+    with pytest.raises(ValueError, match="request changed"):
+        review_source(store, cid, {**request, "action": "rerun_include"})
+    assert store.history(cid) == [first]
+
+
+def test_joined_given_names_use_verified_full_name_without_prefix_guessing():
+    from src.medical_evidence import same_patient
+    assert same_patient('Example, Alexmorgan', 'Alex Morgan Example')
+    assert same_patient('Alex Morgan Example', 'Example, Alex Morgan')
+    assert same_patient('José Alvarez', 'Jose Alvarez')
+    assert not same_patient('Joanna Smith', 'Jo Smith')
+    assert not same_patient('Alex Morgan Example', 'Alex Mason Example')
+
+
+def test_case_verified_alias_recovers_joined_name_but_dob_conflict_remains():
+    data = response()
+    case = {**CASE, 'name': 'Alex Example', 'verified_names': ['Alex Morgan Example']}
+    data['sections'][0]['patient']['name'] = 'Alexmorgan Example'
+    text = TEXT.replace('Alex Example', 'Alexmorgan Example')
+    data['sections'][0]['patient']['evidence'] = [{'page': 1, 'quote': 'Patient: Alexmorgan Example\nDate of birth: 04/14/1980'}]
+    data['sections'][0]['entries'][0]['evidence'] = [{'page': 1, 'quote': text}]
+    assert validate_document(data, [{'page': 1, 'text': text}], case, MEDICAL_POLICY, DOC)['entries']
+    case['dob'] = '04/14/1981'
+    result = validate_document(data, [{'page': 1, 'text': text}], case, MEDICAL_POLICY, DOC)
+    assert not result['entries'] and result['reviews'][0]['kind'] == 'patient_identity'
+
+
+def test_unrelated_bad_date_does_not_withhold_valid_sibling():
+    from src.medical_evidence import validate_sections
+    data = response()
+    invalid = copy.deepcopy(data['sections'][0]['entries'][0])
+    invalid['date_evidence'][0]['quote'] = 'Date of birth: 04/14/1980'
+    data['sections'][0]['entries'].append(invalid)
+    result = validate_sections(data, PAGES, CASE, MEDICAL_POLICY, DOC)
+    assert len(result['entries']) == 1
+    assert len(result['reviews']) == 1 and result['reviews'][0]['kind'] == 'date'
+
+
+def test_coverage_warning_retains_supported_entry_and_attempts_one_recovery(tmp_path):
+    calls = []
+    def call(prompt, **kwargs):
+        calls.append(prompt)
+        if prompt.startswith('Create medical chronology'):
+            return json.dumps(response())
+        candidate = json.loads(prompt[prompt.index('{"policy"'):])['candidate']
+        return json.dumps({'entries': [{'id': e['id'], 'verdict': 'supported', 'reason': 'Exact source supports this entry.'} for e in candidate['entries']], 'missing_encounters': [{'pages': [1], 'reason': 'Another primary encounter needs review.'}]})
+    result = extract_group(PAGES, CASE, MEDICAL_POLICY, DOC, call, tmp_path / 'source.json')
+    assert len(result['entries']) == 1 and result['entries'][0]['verification'] == 'source_checked'
+    assert len(result['reviews']) == 1 and result['reviews'][0]['kind'] == 'coverage'
+    assert len(calls) == 4
+    extract_group(PAGES, CASE, MEDICAL_POLICY, DOC, call, tmp_path / 'source.json')
+    assert len(calls) == 4
+
+
+def test_source_year_corroboration_and_print_timestamp_roles():
+    from src.medical_evidence import supports_encounter_date
+    field = 'DOE: 2/2/26'
+    page = 'Printed 2/3/2026 5:15 PM\n' + field
+    assert not supports_encounter_date(field, '02/02/2026', page)
+    assert supports_encounter_date(field, '02/02/2026', page, ['05/06/2025'])
+    assert not supports_encounter_date(field, '02/03/2026', page, ['05/06/2025'])
+    assert not supports_encounter_date(field, '02/02/2026', page, ['05/06/1925', '05/06/2025'])
+    assert supports_encounter_date('Service Date: 6/19/2025 - Physical Therapy', '06/19/2025', 'Service Date: 6/19/2025 - Physical Therapy')
+
+
+def test_undated_source_can_be_retained_at_end_without_invented_date():
+    data = response()
+    entry = data['sections'][0]['entries'][0]
+    entry['service_dates'] = ['Undated']
+    entry['date_evidence'] = []
+    text = TEXT.replace('Date of service: 02/05/2026', '')
+    entry['evidence'] = [{'page': 1, 'quote': text}]
+    result = validate_document(data, [{'page': 1, 'text': text}], CASE, MEDICAL_POLICY, DOC)
+    assert result['entries'][0]['text'].startswith('Undated. Avery Example, MD.')
+    assert result['entries'][0]['sort_date'] == '9999-12-31'
+
+
+def test_named_manual_entry_saves_with_history_and_only_resolves_its_page(store):
+    from src.medical_run import apply_reviewed_entries, issue_for
+    case, pipeline, _ = prepared_pipeline(store)
+    run = MedicalRun(store, pipeline, case['id'])
+    doc = run.inventory()[0]
+    doc['page_count'] = 2
+    issue = issue_for(doc, 'ocr', 'Two handwritten pages need review.', [1, 2])
+    store.replace_document_result(case['id'], doc, [], [issue])
+    event = review_source(store, case['id'], {'target': issue['id'], 'fingerprint': issue['fingerprint'], 'action': 'include_reviewed', 'reviewer': 'Synthetic Reviewer', 'reason': 'Read the date on the original first page; other handwriting is illegible.', 'page': 1, 'reviewed_date': '01/01/2021', 'reviewed_provider': 'Provider not documented', 'reviewed_facility': 'Facility not documented', 'reviewed_service': 'Chart Notes', 'reviewed_body': '(Handwritten notes are illegible)'})
+    override = store.get(case['id'], 'overrides', doc['id'])
+    result = apply_reviewed_entries({'entries': [], 'excluded': [], 'reviews': [{'pages': [1, 2], 'kind': 'ocr', 'reason': 'Unread pages'}]}, override)
+    assert result['entries'][0]['verification'] == 'human_reviewed'
+    assert result['entries'][0]['review_decision_id'] == event['id']
+    assert result['entries'][0]['text'].startswith('01/01/2021. Provider not documented. Facility not documented. Chart Notes.')
+    assert result['reviews'][0]['pages'] == [2]
+    assert store.history(case['id'])[0]['reviewer'] == 'Synthetic Reviewer'
+
+
+def test_manual_entry_requires_source_page_and_preserves_state_on_invalid_date(store):
+    case, pipeline, _ = prepared_pipeline(store)
+    doc = MedicalRun(store, pipeline, case['id']).inventory()[0]
+    doc['page_count'] = 1
+    store.put(case['id'], 'documents', doc['id'], doc)
+    for page, date in [(None, '01/01/2021'), (1, '02/30/2021')]:
+        with pytest.raises(ValueError):
+            review_source(store, case['id'], {'target': doc['id'], 'fingerprint': doc['sha256'], 'action': 'include_reviewed', 'reviewer': 'Synthetic Reviewer', 'reason': 'Source review', 'page': page, 'reviewed_date': date})
+    assert store.history(case['id']) == []
+
+
+def test_manual_entry_survives_an_ocr_failure_without_approving_other_pages(store, monkeypatch):
+    from src.medical_run import issue_for
+    case, pipeline, _ = prepared_pipeline(store)
+    run = MedicalRun(store, pipeline, case['id'])
+    doc = run.inventory()[0]
+    doc['page_count'] = 2
+    issue = issue_for(doc, 'ocr', 'Unread pages', [1, 2])
+    store.replace_document_result(case['id'], doc, [], [issue])
+    review_source(store, case['id'], {'target': issue['id'], 'fingerprint': issue['fingerprint'], 'action': 'include_reviewed', 'reviewer': 'Synthetic Reviewer', 'reason': 'Reviewed page one.', 'page': 1, 'reviewed_date': '01/01/2021', 'reviewed_provider': 'Provider not documented', 'reviewed_facility': 'Facility not documented', 'reviewed_service': 'Chart Notes', 'reviewed_body': '(Handwritten notes are illegible)'})
+    def fail(_):
+        raise EvidenceReview('Unread pages', 'ocr', [1, 2])
+    monkeypatch.setattr(run, 'read_document', fail)
+    run.generate_document(store.get(case['id'], 'documents', doc['id']))
+    assert store.all(case['id'], 'entries')[0]['verification'] == 'human_reviewed'
+    assert store.all(case['id'], 'issues')[0]['pages'] == [2]
+
+
+@pytest.mark.parametrize('complete', [True, False])
+@pytest.mark.parametrize('existing_preface', [True, False])
+def test_therapy_consolidation_retains_initial_and_only_removes_supported_routine_entries(store, complete, existing_preface):
+    case, pipeline, _ = prepared_pipeline(store)
+    run = MedicalRun(store, pipeline, case['id'])
+    doc = run.inventory()[0]
+    entry = validate_document(response(), PAGES, CASE, MEDICAL_POLICY, doc)['entries'][0]
+    course = []
+    for day, role in [(5, 'initial'), (9, 'routine'), (12, 'closing')]:
+        date = f'02/{day:02d}/2026'
+        course.append({**copy.deepcopy(entry), 'id': role, 'date': date, 'sort_date': f'2026-02-{day:02d}', 'service_dates': [date], 'therapy_role': role, 'therapy_type': 'physical therapy', 'verification': 'source_checked', 'service_name': 'Physical Therapy Progress Note', 'text': f'{date}. Avery Example, MD. Example Clinic. Physical Therapy Progress Note. Physical Examination: Upper extremity strength 5/5. Plan: Continue exercises.'})
+    if existing_preface:
+        course[-1]['text'] = course[-1]['text'].replace('Physical Examination:', 'Patient participated in physical therapy sessions from 02/09/2026 to 02/12/2026. Patient attended sessions on 02/09/2026 and 02/12/2026. Physical Examination:')
+    pipeline.chronology_agent._call_api_with_retry = lambda *args, **kwargs: json.dumps({'supported': True, 'complete': complete, 'reason': 'Synthetic source audit'})
+    result = run.consolidate_therapy(course)
+    assert any(e['id'] == 'initial' for e in result)
+    if complete:
+        assert len(result) == 2
+        merged = next(e for e in result if e['id'] != 'initial')
+        assert 'Patient attended sessions on 02/05/2026, 02/09/2026, and 02/12/2026.' in merged['text']
+        assert merged['date'] == '02/12/2026'
+        assert merged['text'].count('Patient attended sessions on') == 1
+    else:
+        assert result == course
