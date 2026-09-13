@@ -105,6 +105,23 @@ def test_report_date_does_not_override_a_separate_explicit_study_date():
     assert render_diagnostic(entry(quote), {'D001': doc}).startswith(DATE)
 
 
+def test_same_day_procedure_time_range_and_clinician_label_do_not_veto_exam_date():
+    quote = 'DATE/TIME: 01/12/2026 6:56 PM'
+    performed = 'Performed 01/12/26 1846 - 01/12/26 1856'
+    doc = document(quote + '\n' + performed + '\nPerformed by: Example, MD')
+    assert render_diagnostic(entry(quote), {'D001': doc}).startswith(DATE)
+    assert render_diagnostic(entry(performed), {'D001': doc}).startswith(DATE)
+    assert not supports_service_date('Performed by: Example, MD', DATE, doc['content'])
+    assert not supports_service_date(performed, DATE, performed)
+
+
+@pytest.mark.parametrize('end', ['01/13/26 1856', 'unreadable', '01/12/26 1856 and another date'])
+def test_ambiguous_or_cross_day_procedure_range_still_requires_review(end):
+    quote = 'DATE/TIME: 01/12/2026 6:56 PM'
+    doc = document(quote + '\nPerformed 01/12/26 1846 - ' + end)
+    assert not supports_service_date(quote, DATE, doc['content'])
+
+
 def test_wrong_result_page_and_wrong_provider_still_fail():
     quote = 'Collected On 01/12/2026 0900'
     original = document(quote)

@@ -3,7 +3,7 @@ import re
 from datetime import datetime
 
 
-_SERVICE = r'(?:service|exam(?:ination)?|study|procedure|collection|acquisition|visit|referral)'
+_SERVICE = r'(?:service|exam(?:ination)?|study|procedure|collection|acquisition|visit|referral|IME|independent medical examination)'
 _TIME = r'(?:[ \t]*/[ \t]*time)?'
 SERVICE_DATE = re.compile(
     rf'^[ \t]*(?:date{_TIME}[ \t]+of[ \t]+{_SERVICE}|'
@@ -44,7 +44,18 @@ def date_value(field):
     label = SERVICE_DATE.match(field)
     if not label or WRONG_DATE_ROLE.search(field):
         return None
-    remainder = re.split(r"\s+-\s+(?=[A-Za-z])", field[label.end():].strip(), maxsplit=1)[0]
+    remainder = field[label.end():].strip()
+    # Procedure logs often carry a start/end time on the same service day.
+    # Both complete timestamps must name the same date; a cross-day range
+    # remains unresolved instead of silently choosing its first day.
+    if re.match(r"^performed\b", field, re.I):
+        endpoints = re.split(r"\s+-\s+", remainder)
+        if len(endpoints) == 2:
+            values = [_DATE_VALUE.fullmatch(endpoint) for endpoint in endpoints]
+            if all(values) and values[0].group('date') == values[1].group('date'):
+                return values[0].group('date')
+            return None
+    remainder = re.split(r"\s+-\s+(?=[A-Za-z])", remainder, maxsplit=1)[0]
     value = _DATE_VALUE.fullmatch(remainder)
     return value.group('date') if value else None
 
@@ -54,6 +65,8 @@ def date_fields(unit):
     lines = re.split(r"\n|[ \t]{3,}", unit)
     fields = []
     for index, line in enumerate(lines):
+        if re.match(r"^\s*(?:performed|collected|acquired)\s+by\b", line, re.I):
+            continue  # Clinician attribution, not a service-date field.
         if not SERVICE_DATE.match(line) or WRONG_DATE_ROLE.search(line):
             continue
         field = line.strip()

@@ -228,6 +228,40 @@ def test_cached_source_checks_survive_restart_without_more_calls(tmp_path):
     assert first == second and first["entries"][0]["verification"] == "source_checked"
 
 
+def test_validator_repair_reuses_extraction_and_audits_changed_candidate(tmp_path, monkeypatch):
+    import src.medical_evidence as evidence
+
+    validate = evidence.validate_sections
+    calls = {"extraction": 0, "audit": 0}
+
+    def call(prompt, max_tokens):
+        calls["audit" if prompt.startswith("Verify the candidate") else "extraction"] += 1
+        return model_call(prompt, max_tokens)
+
+    def old_validator(*args):
+        result = validate(*args)
+        result["entries"] = []
+        result["reviews"] = [{"kind": "date", "pages": [1], "reason": "Old date rule rejected this field."}]
+        return result
+
+    checkpoint = tmp_path / "work.json"
+    monkeypatch.setattr(evidence, "validate_sections", old_validator)
+    rejected = extract_group(PAGES, CASE, MEDICAL_POLICY, DOC, call, checkpoint)
+    assert rejected["reviews"] and not rejected["entries"]
+    retained_files = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    before = dict(calls)
+    monkeypatch.setattr(evidence, "validate_sections", validate)
+    repaired = extract_group(PAGES, CASE, MEDICAL_POLICY, DOC, call, checkpoint)
+    assert repaired["entries"][0]["verification"] == "source_checked"
+    assert not repaired["reviews"]
+    assert calls["extraction"] == before["extraction"]
+    assert calls["audit"] == before["audit"] + 1
+    assert all((tmp_path / name).read_bytes() == data for name, data in retained_files.items())
+    again = extract_group(PAGES, CASE, MEDICAL_POLICY, DOC,
+                          lambda *a, **k: pytest.fail("Unchanged repaired result should be cached"), checkpoint)
+    assert again == repaired
+
+
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     monkeypatch.setenv("SESSION_DATA_DIR", str(tmp_path / "data"))
@@ -403,6 +437,42 @@ def test_full_medical_job_exports_and_resume_reuses_unchanged_sources(store):
     assert store.job(case["id"])["status"] == "complete"
     assert calls["ocr"] == before["ocr"] and calls["model"] == before["model"]
     assert {a["id"]: a["sha256"] for a in store.all(case["id"], "artifacts")} == hashes
+
+
+def test_new_validator_rechecks_only_flagged_cached_results(store, monkeypatch):
+    import src.medical_run as medical_run
+
+    case, pipeline, calls = prepared_pipeline(store)
+    runner = MedicalRun(store, pipeline, case["id"])
+    runner.run()
+    doc = store.all(case["id"], "documents")[0]
+    resultpath = runner.work / doc["id"] / doc["revision"] / "result.json"
+    saved = json.loads(resultpath.read_text())
+    saved["validation_version"] = "old-validator"
+    atomic_json(resultpath, saved)
+    extract = medical_run.extract_group
+    rechecks = []
+
+    def recheck(*args, **kwargs):
+        rechecks.append(True)
+        return extract(*args, **kwargs)
+
+    monkeypatch.setattr(medical_run, "extract_group", recheck)
+    before_ocr = calls["ocr"]
+    runner.generate_document(doc)
+    assert not rechecks  # A clean, checked result remains usable.
+    saved["reviews"] = [{"kind": "date", "pages": [1], "reason": "Old rule withheld the date."}]
+    saved["context_hash"] = medical_run.digest([runner.case["verified_names"], runner.case["verified_service_dates"]])
+    atomic_json(resultpath, saved)
+    runner.generate_document(doc)
+    assert len(rechecks) == 1
+    refreshed = json.loads(resultpath.read_text())
+    assert refreshed["validation_version"] == medical_run.VALIDATION_VERSION
+    assert not refreshed["reviews"]
+    assert refreshed["entries"][0]["verification"] == "source_checked"
+    assert calls["ocr"] == before_ocr
+    runner.generate_document(doc)
+    assert len(rechecks) == 1
 
 
 def test_targeted_retry_retains_unrelated_ocr_and_entries(store):
@@ -650,6 +720,23 @@ def test_formatted_visit_still_rejects_unsupported_dates_or_provider(failure):
         ] = "Electronically Signed By Invented Clinician on February 05, 2026"
     else:
         record["provider"] += "; Invented Clinician, MD"
+    with pytest.raises(EvidenceReview):
+        validate_document(data, pages, CASE, MEDICAL_POLICY, DOC)
+
+
+@pytest.mark.parametrize('ancillary', [
+    'Adm: 2/5/2026, D/C: 2/5/2026',
+    'Printed: 2/6/2026 5:15 PM',
+    'Generated on February 7, 2026',
+])
+def test_administrative_date_cannot_veto_or_establish_supported_encounter(ancillary):
+    data, pages = formatted_encounter_response()
+    record = data['sections'][0]['entries'][0]
+    pages[0]['text'] += '\n' + ancillary + '\n'
+    reference = {'date': '02/05/2026', 'page': 1, 'quote': ancillary}
+    record['date_evidence'].append(reference)
+    assert len(validate_document(data, pages, CASE, MEDICAL_POLICY, DOC)['entries']) == 1
+    record['date_evidence'] = [reference]
     with pytest.raises(EvidenceReview):
         validate_document(data, pages, CASE, MEDICAL_POLICY, DOC)
 
@@ -1506,6 +1593,14 @@ def test_source_year_corroboration_and_print_timestamp_roles():
     assert not supports_encounter_date(field, '02/03/2026', page, ['05/06/2025'])
     assert not supports_encounter_date(field, '02/02/2026', page, ['05/06/1925', '05/06/2025'])
     assert supports_encounter_date('Service Date: 6/19/2025 - Physical Therapy', '06/19/2025', 'Service Date: 6/19/2025 - Physical Therapy')
+
+
+def test_ime_exam_date_is_distinct_from_report_preparation_date():
+    from src.medical_evidence import supports_encounter_date
+    page = 'Date of IME: 7/29/2026\nDate of IME Report: 8/7/2026'
+    assert supports_encounter_date('Date of IME: 7/29/2026', '07/29/2026', page)
+    assert not supports_encounter_date('Date of IME: 7/29/2026', '08/07/2026', page)
+    assert not supports_encounter_date('Date of IME Report: 8/7/2026', '08/07/2026', page)
 
 
 def test_undated_source_can_be_retained_at_end_without_invented_date():
