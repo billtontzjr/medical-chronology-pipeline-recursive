@@ -286,6 +286,8 @@ class MedicalChronologyPipeline:
         Returns a result dict regardless of success/pause/failure — callers
         inspect ``result['status']``.
         """
+        if (self.store.session_dir(session_id) / 'policy.json').exists():
+            raise ValueError('This medical-only case uses the new case workspace. Its saved work was not changed.')
         self.store.clear_pause(session_id)
         state = self.store.load(session_id)
         state.status = STATUS_IN_PROGRESS

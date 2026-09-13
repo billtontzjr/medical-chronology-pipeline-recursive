@@ -1,5 +1,7 @@
 > Team release: use the protected gateway (`python serve.py`) and follow [Render setup and acceptance checks](docs/TEAM_RELEASE.md). Direct Streamlit hosting does not protect download URLs.
 
+> Medical-only workspace: the opt-in case UI, durable worker, source review and versioned exports are described in [workspace rollout and recovery](docs/medical-workspace.md). Existing saved runs retain their original workflow.
+
 # Medical Chronology Pipeline
 
 An automated pipeline for generating professionally formatted medical chronologies from medical records stored in Dropbox using Google Vision OCR and Claude Agent SDK.
@@ -539,4 +541,3 @@ For issues or questions:
 - Medical records are never permanently stored
 - Output files are in gitignored directories
 - Follow HIPAA guidelines for handling protected health information
-

@@ -37,11 +37,13 @@ def return_session_id(value):
         return ''
 
 
-def login_page(session_id='', *, rejected=False):
+def login_page(session_id='', *, rejected=False, workspace_case=None):
     body = LOGIN
     if session_id:
         hidden = '<input type="hidden" name="session_id" value="' + escape(session_id, quote=True) + '">'
         body = body.replace('</form>', hidden + '</form>')
+    if workspace_case is not None:
+        body=body.replace('</form>','<input type="hidden" name="view" value="workspace"><input type="hidden" name="case" value="'+escape(workspace_case,quote=True)+'"></form>')
     if rejected:
         body = body.replace('Sign in with your team password.', 'Password not accepted. Try again.')
     return body
@@ -65,7 +67,7 @@ def token_valid(token, password, secret, now=None):
         return False
 
 
-def create_app(upstream='http://127.0.0.1:8502', secret=None):
+def create_app(upstream='http://127.0.0.1:8502', secret=None, workspace=None):
     secret = secret or secrets.token_urlsafe(48)
     app = web.Application(client_max_size=200 * 1024 * 1024)
     revoked = {}
@@ -105,9 +107,12 @@ def create_app(upstream='http://127.0.0.1:8502', secret=None):
                 return web.Response(text='Too many attempts. Wait one minute.', status=429, headers=headers)
             form = await request.post()
             session_id = return_session_id(form.get('session_id', ''))
+            workspace_case=return_session_id(form.get('case','')) if form.get('view')=='workspace' else None
             if not password_matches(str(form.get('password', '')), password):
-                return web.Response(text=login_page(session_id, rejected=True), content_type='text/html', status=401, headers=headers)
+                return web.Response(text=login_page(session_id, rejected=True,workspace_case=workspace_case), content_type='text/html', status=401, headers=headers)
             target = '/?' + urlencode({'session_id': session_id}) if session_id else '/'
+            if workspace_case is not None:
+                target='/workspace'+('?' + urlencode({'case':workspace_case}) if workspace_case else '')
             response = web.HTTPSeeOther(target, headers=headers)
             response.set_cookie(COOKIE, sign_token(password, secret), secure=True, httponly=True,
                                 samesite='Strict', max_age=SESSION_SECONDS, path='/')
@@ -121,14 +126,28 @@ def create_app(upstream='http://127.0.0.1:8502', secret=None):
             response.del_cookie(COOKIE, path='/', secure=True, httponly=True, samesite='Strict')
             raise response
         if request.path == '/login':
-            return web.Response(text=login_page(return_session_id(request.query.get('session_id', ''))), content_type='text/html', headers=headers)
+            workspace_case=return_session_id(request.query.get('case','')) if request.query.get('view')=='workspace' else None
+            return web.Response(text=login_page(return_session_id(request.query.get('session_id', '')),workspace_case=workspace_case), content_type='text/html', headers=headers)
         token = request.cookies.get(COOKIE, '')
         if not valid(token):
-            if request.path == '/':
+            if request.path in ('/','/workspace','/workspace/'):
                 session_id = return_session_id(request.query.get('session_id', ''))
                 target = '/login?' + urlencode({'session_id': session_id}) if session_id else '/login'
+                if request.path in ('/workspace','/workspace/'):
+                    target='/login?'+urlencode({'view':'workspace','case':return_session_id(request.query.get('case',''))})
                 raise web.HTTPSeeOther(target, headers=headers)
             return web.Response(text='Sign in to access this resource.', status=401, headers=headers)
+        workspace_route=(request.path.startswith('/workspace') or request.path.startswith('/api/workspace/'))
+        workspace_home=(request.path=='/' and request.query.get('legacy')!='1'
+                        and not request.query.get('session_id')
+                        and os.getenv('CASE_WORKSPACE_ENABLED','false').lower() in ('1','true','yes'))
+        if workspace is not None and (workspace_route or workspace_home):
+            response=await workspace.handle(request)
+            # Only authenticated same-origin PDF embedding is allowed.
+            framed=response.headers.get('X-Frame-Options')=='SAMEORIGIN'
+            response.headers.update(headers)
+            if framed:response.headers['X-Frame-Options']='SAMEORIGIN'
+            return response
         forwarded = {k: v for k, v in request.headers.items()
                      if k.lower() not in HOP and k.lower() not in ('x-chronology-gateway',)}
         forwarded['X-Chronology-Gateway'] = secret
@@ -192,8 +211,27 @@ if __name__ == '__main__':
     env = dict(os.environ, APP_GATEWAY_SECRET=secret)
     child = subprocess.Popen([sys.executable, '-m', 'streamlit', 'run', 'app.py',
         '--server.port=8502', '--server.address=127.0.0.1', '--server.headless=true'], env=env)
+    from src.workspace_api import WorkspaceAPI
+    workspace=WorkspaceAPI(os.path.dirname(os.path.abspath(__file__)))
+    worker=subprocess.Popen([sys.executable,'-m','src.workspace_worker'],env=env)
+    async def supervise(app):
+        nonlocal_holder={'process':worker}
+        async def keep_running():
+            while True:
+                await asyncio.sleep(5)
+                if nonlocal_holder['process'].poll() is not None:
+                    nonlocal_holder['process']=subprocess.Popen([sys.executable,'-m','src.workspace_worker'],env=env)
+        task=asyncio.create_task(keep_running())
+        yield
+        task.cancel()
+        await asyncio.gather(task,return_exceptions=True)
+        process=nonlocal_holder['process'];process.terminate()
+        try:await asyncio.to_thread(process.wait,30)
+        except subprocess.TimeoutExpired:process.kill()
+    application=create_app(secret=secret,workspace=workspace)
+    application.cleanup_ctx.append(supervise)
     try:
-        web.run_app(create_app(secret=secret), host='0.0.0.0', port=int(os.getenv('PORT', '8501')), access_log=None)
+        web.run_app(application, host='0.0.0.0', port=int(os.getenv('PORT', '8501')), access_log=None)
     finally:
         child.terminate()
         try:

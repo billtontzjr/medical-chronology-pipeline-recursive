@@ -20,12 +20,14 @@ def _display_text(text: str) -> str:
     return re.sub(rf'({DATE})\s*[–—−-]\s*({DATE})', r'\1 to \2', text)
 
 
-def chronology_docx(markdown: str, *, separate_billing: bool = False, records=None) -> bytes:
+def chronology_docx(markdown: str, *, separate_billing: bool = False, records=None, template='classic') -> bytes:
     """Preserve every entry, optionally relocate explicitly labeled billing entries.
 
     The label is taken from the existing draft, not independently validated.
     Paragraph conversion deliberately leaves unfamiliar syntax/text intact.
     """
+    if template not in ('classic','underlined','plain'):
+        raise ValueError('Unknown chronology Word template.')
     doc = Document()
     section = doc.sections[0]
     section.page_width, section.page_height = Inches(8.5), Inches(11)
@@ -60,15 +62,19 @@ def chronology_docx(markdown: str, *, separate_billing: bool = False, records=No
 
     def add_block(block):
         if block.startswith('MEDICAL RECORDS SUMMARY'):
-            doc.add_paragraph()
+            if template!='plain':doc.add_paragraph()
             for line in block.splitlines():
                 p = doc.add_paragraph()
-                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                p.paragraph_format.space_after = Pt(0 if line.startswith('Date of Birth:') else 10)
-                p.add_run(line).bold = True
+                p.alignment = WD_ALIGN_PARAGRAPH.LEFT if template=='plain' else WD_ALIGN_PARAGRAPH.CENTER
+                p.paragraph_format.space_after = Pt(0 if template=='plain' or line.startswith('Date of Birth:') else 10)
+                run=p.add_run(line)
+                run.bold=template!='plain'
+                if template=='underlined' and line.startswith('MEDICAL RECORDS SUMMARY'):
+                    run.underline=True
+            if template=='plain':doc.add_paragraph()
             return
         p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY if template=='underlined' else WD_ALIGN_PARAGRAPH.LEFT
         p.paragraph_format.left_indent = Inches(0)
         p.paragraph_format.right_indent = Inches(0)
         p.paragraph_format.first_line_indent = Inches(0)

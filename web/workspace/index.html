@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Medical Chronology · Case workspace</title>
+    <link rel="stylesheet" href="/workspace/assets/style.css" />
+  </head>
+  <body>
+    <a href="#main" class="skip">Skip to content</a>
+    <div id="app"><p class="loading">Opening your case workspace…</p></div>
+    <dialog id="new-case">
+      <form id="new-form">
+        <div class="dialog-head">
+          <div>
+            <p class="eyebrow">NEW CASE</p>
+            <h2>Start with the original records</h2>
+          </div>
+          <button type="button" data-action="close-dialog" aria-label="Close">
+            ×
+          </button>
+        </div>
+        <label
+          >Patient name<input name="name" required autocomplete="off"
+        /></label>
+        <div class="two">
+          <label
+            >Date of birth<input name="dob" placeholder="MM/DD/YYYY" /></label
+          ><label
+            >Date of injury<input name="doi" placeholder="MM/DD/YYYY"
+          /></label>
+        </div>
+        <label
+          >Dropbox records folder<input
+            name="source"
+            type="url"
+            required
+            placeholder="https://www.dropbox.com/…"
+        /></label>
+        <p class="hint">
+          Original files stay in place. Chronologies and review reports are
+          saved to a separate output folder.
+        </p>
+        <details>
+          <summary>Scope and advanced settings</summary>
+          <label class="check"
+            ><input type="checkbox" name="medical_expert_reports" checked />
+            Include IME and medical expert evaluations</label
+          ><label class="check"
+            ><input type="checkbox" name="billing_only" /> Include billing-only
+            records</label
+          >
+          <p class="hint">
+            Depositions and legal correspondence are excluded. Medical reports
+            enclosed with legal documents remain eligible.
+          </p>
+          <label
+            >Word template<select name="template">
+              <option value="underlined">
+                Medical Records Summary · underlined title
+              </option>
+              <option value="classic">Medical Records Summary · classic</option>
+              <option value="plain">
+                Medical Records Summary · plain heading
+              </option>
+            </select></label
+          ><label
+            >Generation model<input name="model" value="claude-opus-5"
+          /></label>
+        </details>
+        <div class="form-error" role="alert"></div>
+        <div class="dialog-actions">
+          <button type="button" data-action="close-dialog">Cancel</button
+          ><button class="primary" type="submit">Create case</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="decision-dialog">
+      <form id="decision-form">
+        <div class="dialog-head">
+          <h2>Record your review</h2>
+          <button type="button" data-action="close-dialog" aria-label="Close">
+            ×
+          </button>
+        </div>
+        <p id="decision-context"></p>
+        <input type="hidden" name="target" /><input
+          type="hidden"
+          name="fingerprint"
+        /><label
+          >Action<select name="action">
+            <option value="retry">Retry extraction for this document</option>
+            <option value="resolve">Resolve after checking the original</option>
+            <option value="keep_distinct">Keep as a distinct record</option>
+            <option value="defer">Defer and keep flagged</option>
+            <option value="reconsider">Reconsider exclusion</option>
+            <option value="restore">Undo prior decision and reopen</option>
+          </select></label
+        ><label
+          >Your name<input
+            name="reviewer"
+            required
+            autocomplete="name" /></label
+        ><label
+          >Decision and source reference<textarea
+            name="reason"
+            required
+            rows="4"
+            placeholder="What you checked, the source page, and what should happen next"
+          ></textarea>
+        </label>
+        <details>
+          <summary>Source-backed correction</summary>
+          <label
+            >Physical PDF page<input name="page" type="number" min="1" /></label
+          ><label
+            >Corrected OCR text for this page<textarea
+              name="corrected_text"
+              rows="7"
+            ></textarea>
+          </label>
+          <p class="hint">
+            Corrections remain attached to this exact source version. Original
+            files are never overwritten.
+          </p>
+        </details>
+        <div class="form-error" role="alert"></div>
+        <div class="dialog-actions">
+          <button type="button" data-action="close-dialog">Cancel</button
+          ><button class="primary" type="submit">Save review</button>
+        </div>
+      </form>
+    </dialog>
+    <div id="toast" role="status" aria-live="polite"></div>
+    <script src="/workspace/assets/app.js" defer></script>
+  </body>
+</html>

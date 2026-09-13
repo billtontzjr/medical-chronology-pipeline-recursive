@@ -462,82 +462,87 @@ tab_new, tab_sessions = st.tabs(["🚀 New Run", "📚 Sessions"])
 
 # ---------------------------------------------------------------- NEW RUN tab
 with tab_new:
-    st.header("Start a new chronology")
+    if os.getenv('CASE_WORKSPACE_ENABLED','false').lower() in ('1','true','yes'):
+        st.header("Start a medical-only chronology")
+        st.link_button("Open the case workspace", "/workspace")
+        st.caption("Saved historical runs remain available below and under Sessions.")
+    else:
+        st.header("Start a new chronology")
 
-    col_left, col_right = st.columns([2, 1])
-    with col_left:
-        dropbox_link = st.text_input(
-            "Dropbox folder shared link",
-            placeholder="https://www.dropbox.com/scl/fo/...",
-            help="Right-click the patient folder in Dropbox → Share → Create link.",
-        )
-        st.link_button("📂 Open Dropbox", "https://www.dropbox.com/home")
-
-        patient_id = st.text_input(
-            "Patient ID",
-            placeholder="e.g. john_doe",
-            help="Used to prefix the session folder and Dropbox destination.",
-        )
-
-    with col_right:
-        st.markdown("### Output destination")
-        recents = recent_destinations(pipeline)
-        default_dest = (
-            f"{DEFAULT_DESTINATION_PREFIX}/{patient_id}" if patient_id else DEFAULT_DESTINATION_PREFIX
-        )
-        dest_choice = st.radio(
-            "Where should outputs go?",
-            options=["Default", "Recent folder", "Custom"],
-            index=0,
-            horizontal=True,
-        )
-        if dest_choice == "Default":
-            destination = default_dest
-            st.caption(f"→ `{destination}/<session_id>`")
-        elif dest_choice == "Recent folder" and recents:
-            destination = st.selectbox("Recent folders", recents)
-        elif dest_choice == "Recent folder":
-            st.info("No recent folders yet — use Default or Custom.")
-            destination = default_dest
-        else:
-            destination = st.text_input(
-                "Custom Dropbox folder",
-                value=default_dest,
-                help=(
-                    "Enter a Dropbox path, OR paste a Dropbox URL from your "
-                    "browser's address bar — the app converts URLs to paths "
-                    "automatically."
-                ),
-                placeholder="/Medical chronology pipeline outputs/New case  or  https://www.dropbox.com/home/…",
+        col_left, col_right = st.columns([2, 1])
+        with col_left:
+            dropbox_link = st.text_input(
+                "Dropbox folder shared link",
+                placeholder="https://www.dropbox.com/scl/fo/...",
+                help="Right-click the patient folder in Dropbox → Share → Create link.",
             )
-        destination = normalize_dropbox_folder(destination) if destination else default_dest
+            st.link_button("📂 Open Dropbox", "https://www.dropbox.com/home")
 
-    st.markdown("---")
-    start = st.button("🚀 Start chronology run", type="primary", use_container_width=True)
+            patient_id = st.text_input(
+                "Patient ID",
+                placeholder="e.g. john_doe",
+                help="Used to prefix the session folder and Dropbox destination.",
+            )
 
-    if start:
-        if not dropbox_link:
-            st.error("Provide a Dropbox shared link.")
-        elif not patient_id:
-            st.error("Provide a patient ID.")
-        else:
-            # If destination was left at the prefix, append session-level folder
-            final_destination = destination
-            if final_destination == DEFAULT_DESTINATION_PREFIX or final_destination == default_dest:
-                # let the pipeline default handle it (session_id suffix)
-                final_destination = None
-            try:
-                state = pipeline.create_session(
-                    dropbox_link=dropbox_link,
-                    patient_id=patient_id,
-                    destination_folder=final_destination,
+        with col_right:
+            st.markdown("### Output destination")
+            recents = recent_destinations(pipeline)
+            default_dest = (
+                f"{DEFAULT_DESTINATION_PREFIX}/{patient_id}" if patient_id else DEFAULT_DESTINATION_PREFIX
+            )
+            dest_choice = st.radio(
+                "Where should outputs go?",
+                options=["Default", "Recent folder", "Custom"],
+                index=0,
+                horizontal=True,
+            )
+            if dest_choice == "Default":
+                destination = default_dest
+                st.caption(f"→ `{destination}/<session_id>`")
+            elif dest_choice == "Recent folder" and recents:
+                destination = st.selectbox("Recent folders", recents)
+            elif dest_choice == "Recent folder":
+                st.info("No recent folders yet — use Default or Custom.")
+                destination = default_dest
+            else:
+                destination = st.text_input(
+                    "Custom Dropbox folder",
+                    value=default_dest,
+                    help=(
+                        "Enter a Dropbox path, OR paste a Dropbox URL from your "
+                        "browser's address bar — the app converts URLs to paths "
+                        "automatically."
+                    ),
+                    placeholder="/Medical chronology pipeline outputs/New case  or  https://www.dropbox.com/home/…",
                 )
-            except ValueError as exc:
-                st.error(str(exc))
-                st.stop()
-            st.session_state["active_session_id"] = state.session_id
-            st.success(f"Session created: `{state.session_id}`")
-            st.rerun()
+            destination = normalize_dropbox_folder(destination) if destination else default_dest
+
+        st.markdown("---")
+        start = st.button("🚀 Start chronology run", type="primary", use_container_width=True)
+
+        if start:
+            if not dropbox_link:
+                st.error("Provide a Dropbox shared link.")
+            elif not patient_id:
+                st.error("Provide a patient ID.")
+            else:
+                # If destination was left at the prefix, append session-level folder
+                final_destination = destination
+                if final_destination == DEFAULT_DESTINATION_PREFIX or final_destination == default_dest:
+                    # let the pipeline default handle it (session_id suffix)
+                    final_destination = None
+                try:
+                    state = pipeline.create_session(
+                        dropbox_link=dropbox_link,
+                        patient_id=patient_id,
+                        destination_folder=final_destination,
+                    )
+                except ValueError as exc:
+                    st.error(str(exc))
+                    st.stop()
+                st.session_state["active_session_id"] = state.session_id
+                st.success(f"Session created: `{state.session_id}`")
+                st.rerun()
 
     # If a session is active in this browser, show its live run panel
     live_sid = st.session_state.get("active_session_id") or active_session_id
