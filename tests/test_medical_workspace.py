@@ -1636,6 +1636,47 @@ def test_coverage_warning_retains_supported_entry_and_attempts_one_recovery(tmp_
     assert len(calls) == 4
 
 
+@pytest.mark.parametrize('restored_verdict', ['supported', 'uncertain'])
+def test_recovery_audits_combined_entries_before_deciding_coverage(tmp_path, restored_verdict):
+    second_text = TEXT.replace('PAGE 1', 'PAGE 2').replace('02/05/2026', '02/06/2026')
+    pages = [*PAGES, {'page': 2, 'text': second_text}]
+    first = response()['sections'][0]
+    second = json.loads(json.dumps(first).replace('02/05/2026', '02/06/2026').replace('PAGE 1', 'PAGE 2'))
+    second['pages'] = [2]
+    for ref in [*second['patient']['evidence'], *second['entries'][0]['date_evidence'], *second['entries'][0]['evidence']]:
+        ref['page'] = 2
+    calls = []
+    audits = []
+    def call(prompt, **kwargs):
+        calls.append(prompt)
+        if prompt.startswith('Create medical chronology'):
+            if 'TARGETED SOURCE RECOVERY' in prompt:
+                return json.dumps({'sections': [
+                    {'pages': [1], 'scope': 'excluded', 'category': 'administrative', 'reason': 'Mistaken recovery exclusion'},
+                    second,
+                ]})
+            return json.dumps({'sections': [first, {'pages': [2], 'scope': 'review', 'reason': 'Needs extraction'}]})
+        candidate = json.loads(prompt[prompt.index('{"policy"'):])['candidate']
+        audits.append(candidate)
+        if len(audits) == 2:
+            assert {e['date'] for e in candidate['entries']} == {'02/05/2026', '02/06/2026'}
+            assert not candidate['excluded']
+        return json.dumps({
+            'entries': [{'id': e['id'], 'verdict': restored_verdict if len(audits) == 2 and e['date'] == '02/05/2026' else 'supported', 'reason': 'Independent source check'} for e in candidate['entries']],
+            'missing_encounters': [{'pages': [2], 'reason': 'Second encounter missing'}] if len(audits) == 1 else [],
+        })
+    checkpoint = tmp_path / 'source.json'
+    result = extract_group(pages, CASE, MEDICAL_POLICY, DOC, call, checkpoint)
+    assert len(result['entries']) == (2 if restored_verdict == 'supported' else 1)
+    assert not any(r['kind'] == 'coverage' for r in result['reviews'])
+    assert bool(result['reviews']) == (restored_verdict == 'uncertain')
+    assert len(calls) == 4
+    original_files = {p.name: p.read_bytes() for p in tmp_path.glob('*.json')}
+    assert extract_group(pages, CASE, MEDICAL_POLICY, DOC, call, checkpoint) == result
+    assert len(calls) == 4
+    assert original_files == {p.name: p.read_bytes() for p in tmp_path.glob('*.json')}
+
+
 def test_source_year_corroboration_and_print_timestamp_roles():
     from src.medical_evidence import supports_encounter_date
     field = 'DOE: 2/2/26'
