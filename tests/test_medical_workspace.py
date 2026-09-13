@@ -505,6 +505,155 @@ def test_identity_birth_date_must_have_birth_date_role():
     assert not result["entries"] and result["reviews"][0]["kind"] == "patient_identity"
 
 
+@pytest.mark.parametrize(
+    "birth_field",
+    [
+        "Date of Birth: Apr 14, 1980",
+        "Date of birth: April 14, 1980",
+        "DOB: 1980-04-14",
+        "Birth date: 04-14-1980",
+        "Date of birth\n: Apr 14, 1980",
+    ],
+)
+@pytest.mark.parametrize("case_dob", ["", "04/14/1980"])
+def test_birth_date_presentation_does_not_withhold_documented_visit(
+    birth_field, case_dob
+):
+    data = response()
+    text = TEXT.replace("Date of birth: 04/14/1980", birth_field)
+    patient = data["sections"][0]["patient"]
+    patient["evidence"][0]["quote"] = "Patient: Alex Example\n" + birth_field
+    data["sections"][0]["entries"][0]["evidence"][0]["quote"] = text
+    result = validate_document(
+        data,
+        [{"page": 1, "text": text}],
+        {"name": CASE["name"], "dob": case_dob},
+        MEDICAL_POLICY,
+        DOC,
+    )
+    assert len(result["entries"]) == 1
+    assert not result["reviews"]
+    assert result["entries"][0]["source_patient"]["dob"] == "04/14/1980"
+    # The source quotation remains verbatim, with the original month/date format.
+    assert birth_field in result["entries"][0]["evidence"][0]["quote"]
+
+
+@pytest.mark.parametrize(
+    "birth_field",
+    [
+        "DOB: Apr 14, 1981",  # Actual discrepancy, not a format difference.
+        "DOB: 04/14/80",  # Do not infer a century.
+        "DOB: Apr 14, 19800",  # Do not accept a valid prefix of an invalid year.
+        "DOB: Feb 30, 1980",  # Invalid calendar date.
+        "DOB: unknown\nDate of service: Apr 14, 1980",
+        "Age: 46\nDate of visit: Apr 14, 1980",
+    ],
+)
+def test_birth_date_format_support_does_not_accept_unverified_identity(birth_field):
+    data = response()
+    text = TEXT.replace("Date of birth: 04/14/1980", birth_field)
+    data["sections"][0]["patient"]["evidence"][0]["quote"] = (
+        "Patient: Alex Example\n" + birth_field
+    )
+    data["sections"][0]["entries"][0]["evidence"][0]["quote"] = text
+    result = validate_document(
+        data, [{"page": 1, "text": text}], CASE, MEDICAL_POLICY, DOC
+    )
+    assert not result["entries"]
+    assert result["reviews"][0]["kind"] == "patient_identity"
+
+
+def test_written_month_conflict_is_detected_outside_selected_identity_quote():
+    data = response()
+    text = TEXT + "\nPatient: Alex Example\nDOB: April 14, 1981\n"
+    data["sections"][0]["entries"][0]["evidence"][0]["quote"] = text
+    result = validate_document(
+        data, [{"page": 1, "text": text}], CASE, MEDICAL_POLICY, DOC
+    )
+    assert not result["entries"]
+    assert result["reviews"][0]["kind"] == "patient_identity"
+
+
+def formatted_encounter_response():
+    data = response()
+    text = TEXT.replace("Date of birth: 04/14/1980", "Date of Birth: Apr 14, 1980")
+    text = text.replace(
+        "Date of service: 02/05/2026", "Date of Visit: February 05, 2026"
+    )
+    signature = (
+        "Electronically Signed By Avery Example, MD on February 05, 2026 08:38 AM"
+    )
+    cosigner = "Electronically Co-Signed By Robin Example, MD"
+    text += "\n" + signature + "\n" + cosigner + " on February 07, 2026\n"
+    section = data["sections"][0]
+    section["patient"]["evidence"] = [
+        {"page": 1, "quote": "Patient: Alex Example\nDate of Birth: Apr 14, 1980"}
+    ]
+    record = section["entries"][0]
+    record["provider"] = "Avery Example, MD; " + cosigner
+    record["date_evidence"] = [
+        {"date": "02/05/2026", "page": 1, "quote": "Date of Visit: February 05, 2026"},
+        {"date": "02/05/2026", "page": 1, "quote": signature},
+    ]
+    record["evidence"] = [{"page": 1, "quote": text}]
+    return data, [{"page": 1, "text": text}]
+
+
+def test_formatted_visit_reaches_independent_audit_with_roles_preserved(tmp_path):
+    data, pages = formatted_encounter_response()
+    audits = []
+
+    def call(prompt, max_tokens):
+        if prompt.startswith("Verify the candidate"):
+            payload = json.loads(prompt[prompt.index('{"policy"') :])
+            audits.append(payload["candidate"]["entries"])
+            return model_call(prompt, max_tokens)
+        return json.dumps(data)
+
+    result = extract_group(
+        pages, {"name": CASE["name"]}, MEDICAL_POLICY, DOC, call, tmp_path / "work.json"
+    )
+    assert len(result["entries"]) == 1 and not result["reviews"]
+    assert len(audits) == 1 and len(audits[0]) == 1
+    entry = result["entries"][0]
+    assert entry["service_dates"] == ["02/05/2026"]
+    assert "Co-Signed By Robin Example, MD" in entry["provider"]
+    assert entry["verification"] == "source_checked"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "signature_only",
+        "conflicting_service",
+        "invented_signature",
+        "invented_provider",
+    ],
+)
+def test_formatted_visit_still_rejects_unsupported_dates_or_provider(failure):
+    data, pages = formatted_encounter_response()
+    record = data["sections"][0]["entries"][0]
+    if failure == "signature_only":
+        record["date_evidence"] = record["date_evidence"][1:]
+    elif failure == "conflicting_service":
+        pages[0]["text"] += "\nDate of Visit: February 06, 2026\n"
+        record["date_evidence"].append(
+            {
+                "date": "02/05/2026",
+                "page": 1,
+                "quote": "Date of Visit: February 06, 2026",
+            }
+        )
+    elif failure == "invented_signature":
+        record["date_evidence"][1][
+            "quote"
+        ] = "Electronically Signed By Invented Clinician on February 05, 2026"
+    else:
+        record["provider"] += "; Invented Clinician, MD"
+    with pytest.raises(EvidenceReview):
+        validate_document(data, pages, CASE, MEDICAL_POLICY, DOC)
+
+
 def test_historical_and_new_cases_are_isolated_and_collisions_preserved(store):
     from src.session_state import SessionStore
 

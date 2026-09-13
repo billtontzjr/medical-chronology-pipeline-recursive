@@ -14,7 +14,7 @@ from .response_recovery import capture_responses, IncompleteResponseError
 from .deposition import transcript_structure
 from .chronology_scope import _has_medical_content
 
-PROTOCOL = "medical-page-evidence-v5"
+PROTOCOL = "medical-page-evidence-v6"
 PAGE_LIMIT = 48000
 CLINICAL = {"clinical_care", "medical_evaluation", "diagnostic_test", "medical_billing"}
 EXCLUDED = {
@@ -208,6 +208,31 @@ def explicit_patient_names(text):
     return names
 
 
+def explicit_birth_dates(text):
+    """Normalize only dates immediately following a birth-date label.
+
+    The source may print a month name or ISO date while the structured response
+    uses MM/DD/YYYY. Preserve the field's role, require a full year, and never
+    borrow an accident/visit date or infer a birthday from the patient's age.
+    """
+    token = (
+        r"(?:\d{4}-\d{1,2}-\d{1,2}|"
+        r"\d{1,2}[/-]\d{1,2}[/-]\d{4}|"
+        r"[A-Za-z]+[ \t]+\d{1,2},?[ \t]+\d{4})(?![\w/-])"
+    )
+    return {
+        date_key(date)
+        for match in re.finditer(
+            r"\b(?:date[ \t]+of[ \t]+birth|DOB|birth[ \t]+date)\s*:?\s*("
+            + token
+            + r")",
+            text,
+            re.I,
+        )
+        for date in full_dates(match[1])
+    }
+
+
 def same_patient(actual, expected):
     a, b = name_key(actual), name_key(expected)
     if not a or not b:
@@ -328,6 +353,18 @@ def service_title_supported(value, pages):
         ):
             return True
     return False
+
+
+def provider_attribution_supported(value, source):
+    """Allow separately quoted treating/co-signing provider fields in a header."""
+    if normalized(value) in normalized(source):
+        return True
+    parts = [part.strip() for part in value.split(";")]
+    return (
+        2 <= len(parts) <= 3
+        and all(parts)
+        and all(normalized(part) in normalized(source) for part in parts)
+    )
 
 
 def retained_call(path, prompt, call, validate, budget=16000):
@@ -498,12 +535,11 @@ def validate_document(data, pages, case, policy, document, identity_context=()):
             for content in source.values()
             for name in explicit_patient_names(content)
         ]
-        explicit_dobs = []
-        for content in source.values():
-            for match in re.finditer(
-                r"(?im)\b(?:Date of birth|DOB)\s*:\s*(\d{1,2}/\d{1,2}/\d{4})", content
-            ):
-                explicit_dobs.append(date_key(match[1]))
+        explicit_dobs = {
+            date
+            for content in source.values()
+            for date in explicit_birth_dates(content)
+        }
         mismatch = (
             not same_patient(name, case["name"])
             or any(not same_patient(n, case["name"]) for n in explicit_names)
@@ -524,15 +560,7 @@ def validate_document(data, pages, case, policy, document, identity_context=()):
                 }
             )
             continue
-        source_dobs = set()
-        for value in re.findall(
-            r"(?i)(?:date of birth|DOB|birth date)\s*:?\s*(\d{1,2}/\d{1,2}/\d{4})",
-            identity_text,
-        ):
-            try:
-                source_dobs.add(date_key(value))
-            except EvidenceReview:
-                pass
+        source_dobs = explicit_birth_dates(identity_text)
         if dob and date_key(dob) not in source_dobs:
             reviews.append(
                 {
@@ -615,16 +643,32 @@ def validate_document(data, pages, case, policy, document, identity_context=()):
                     raise FormatError(
                         "Cite an exact service-date field for every service date."
                     )
+                supported_dates = set()
                 for ref in date_refs:
                     exact_evidence([ref], source)
-                    if not supports_encounter_date(
+                    if supports_encounter_date(
                         ref["quote"], ref["date"], source[ref["page"]]
+                    ):
+                        supported_dates.add(ref["date"])
+                    elif not re.match(
+                        r"^\s*(?:electronically\s+)?(?:co[- ]?)?signed\s+by\b",
+                        ref["quote"],
+                        re.I,
                     ):
                         raise EvidenceReview(
                             "A service date is not supported by its cited date field.",
                             "date",
                             [ref["page"]],
                         )
+                    # An exact signature is ancillary evidence. It cannot
+                    # establish a visit date or veto an independently cited
+                    # service-date field. Other invalid date fields still fail.
+                if supported_dates != set(dates):
+                    raise EvidenceReview(
+                        "A service date has no supported visit-date field; signature dates cannot establish a visit.",
+                        "date",
+                        numbers,
+                    )
                 dates = [
                     datetime.strptime(d, "%m/%d/%Y").strftime("%m/%d/%Y") for d in dates
                 ]
@@ -646,7 +690,11 @@ def validate_document(data, pages, case, policy, document, identity_context=()):
                     supported = (
                         service_title_supported(value, source.values())
                         if label == "Service"
-                        else normalized(value) in normalized(full)
+                        else (
+                            provider_attribution_supported(value, full)
+                            if label == "Provider"
+                            else normalized(value) in normalized(full)
+                        )
                     )
                     if (
                         value
