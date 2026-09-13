@@ -14,7 +14,7 @@ from .response_recovery import capture_responses, IncompleteResponseError
 from .deposition import transcript_structure
 from .chronology_scope import _has_medical_content
 
-PROTOCOL = "medical-page-evidence-v2"
+PROTOCOL = "medical-page-evidence-v3"
 PAGE_LIMIT = 48000
 CLINICAL = {"clinical_care", "medical_evaluation", "diagnostic_test", "medical_billing"}
 EXCLUDED = {
@@ -108,25 +108,86 @@ def name_key(value):
     return re.sub(r"[^a-z0-9 ]", "", value.casefold()).split()
 
 
+def report_date_fields(text):
+    """Read a bounded EMR header and its explicitly labeled progress-note date.
+
+    OCR can interleave a short letter-only logo between DOS and its value.
+    The independent appointment/footer date must corroborate that date; a
+    birthday, print timestamp or a historical date cannot supply the value.
+    """
+    numeric = r"\d{1,2}/\d{1,2}/\d{4}(?![\d/])"
+    patterns = {
+        "dos": rf"\bDOS\s*:\s*(?:[A-Za-z &-]{{1,100}}\n){{0,3}}({numeric})",
+        "appointment": rf"(?m)^Appointment Facility:[^\n]{{1,200}}\n\s*({numeric})",
+        "progress": rf"(?m)^Progress Note:\s*[A-Za-z .,'-]{{2,120}}\s+({numeric})[ \t]*$",
+    }
+    return {
+        role: {
+            value
+            for match in re.finditer(
+                pattern, text if role == "progress" else text[:1500], re.I
+            )
+            for value in full_dates(match[1])
+        }
+        for role, pattern in patterns.items()
+    }
+
+
 def supports_encounter_date(quote, date, unit):
     """Clinical attendance can have several separately labeled service dates.
 
     Preserve the diagnostic check's strict single-study date rule. Only a full,
     explicit encounter-date field gets this multiple-date allowance.
     """
+    pattern = (
+        r"(?<!\w)"
+        + r"\s+".join(re.escape(part) for part in quote.split())
+        + r"(?![\d/])"
+    )
+    plural = re.match(
+        r"^\s*(?:dates\s+of\s+(?:service|visit|procedure)|(?:service|visit|procedure)\s+dates)\s*:\s*",
+        quote,
+        re.I,
+    )
+    if plural:
+        # Attendance lists name discrete dates. A range, billing period or
+        # narrative history cannot establish additional service dates.
+        numeric = r"\d{1,2}/\d{1,2}/\d{4}"
+        separator = r"(?:\s*,\s*(?:and\s+)?|\s*;\s*|\s+and\s+)"
+        value = quote[plural.end() :].strip().removesuffix(".")
+        if not re.fullmatch(
+            numeric + r"(?:" + separator + numeric + r")*", value, re.I
+        ):
+            return False
+        try:
+            dates = {
+                datetime.strptime(item, "%m/%d/%Y").strftime("%m/%d/%Y")
+                for item in re.findall(numeric, value)
+            }
+            expected = datetime.strptime(date, "%m/%d/%Y").strftime("%m/%d/%Y")
+        except ValueError:
+            return False
+        return expected in dates and bool(re.search(pattern, unit, re.I))
     role = r"(?:date\s+of\s+(?:service|visit|exam(?:ination)?|procedure|admission|discharge)|(?:service|visit|exam(?:ination)?|procedure|admission|discharge)\s+date|DOS)"
     label = re.match(r"^\s*" + role + r"\s*:\s*", quote, re.I)
     if label:
         value = date_value("Date of service: " + quote[label.end() :])
         expected = datetime.strptime(date, "%m/%d/%Y").strftime("%m/%d/%Y")
-        pattern = (
-            r"(?<!\w)"
-            + r"\s+".join(re.escape(part) for part in quote.split())
-            + r"(?![\d/])"
-        )
-        return bool(
-            value and full_dates(value) == {expected} and re.search(pattern, unit, re.I)
-        )
+        if value:
+            return bool(
+                full_dates(value) == {expected} and re.search(pattern, unit, re.I)
+            )
+    fields = report_date_fields(unit)
+    quoted = report_date_fields(quote)
+    expected = {datetime.strptime(date, "%m/%d/%Y").strftime("%m/%d/%Y")}
+    if (
+        fields["dos"] == expected
+        and (fields["appointment"] == expected or fields["progress"] == expected)
+        and all(not values or values == expected for values in fields.values())
+        and any(values == expected for values in quoted.values())
+        and re.search(pattern, unit, re.I)
+    ):
+        return True
     return supports_service_date(quote, date, unit)
 
 
@@ -172,6 +233,33 @@ def page_groups(pages):
         yield group
 
 
+def source_quote(quote, page):
+    """Return the actual source span, allowing only presentation differences.
+
+    In addition to whitespace/case, allow an Oxford comma before 'and' and a
+    line break after an alphabetic hyphen. Never remove punctuation in numbers,
+    change words, join separated passages, or search another physical page.
+    """
+    value = normalized(quote)
+    value = re.sub(r",(?=\s+and\b)", "", value)
+    value = re.sub(r"(?<=[a-z])-\s+(?=[a-z])", "-", value)
+    parts = re.split(r"(\s+and\b|(?<=[a-z])-(?=[a-z])|\s+)", value)
+    pattern = "".join(
+        (
+            r",?\s+and"
+            if part.strip() == "and" and part[:1].isspace()
+            else (
+                r"-\s*"
+                if part == "-"
+                else r"\s+" if part.isspace() else re.escape(part)
+            )
+        )
+        for part in parts
+    )
+    match = re.search(pattern, page, re.I)
+    return match[0] if match else None
+
+
 def exact_evidence(items, pages):
     if not isinstance(items, list) or not items:
         raise EvidenceReview("A proposed fact has no source-page citation.")
@@ -186,17 +274,18 @@ def exact_evidence(items, pages):
                 "Every citation must identify one supplied physical PDF page."
             )
         quote = item.get("quote")
-        if (
-            not isinstance(quote, str)
-            or not quote.strip()
-            or normalized(quote) not in normalized(pages[item["page"]])
-        ):
+        original = (
+            source_quote(quote, pages[item["page"]])
+            if isinstance(quote, str) and quote.strip()
+            else None
+        )
+        if original is None:
             raise EvidenceReview(
                 "A proposed citation does not match the original extracted page.",
                 "source_evidence",
                 [item["page"]],
             )
-        result.append({"page": item["page"], "quote": quote})
+        result.append({"page": item["page"], "quote": original})
     return result
 
 
