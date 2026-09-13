@@ -27,7 +27,9 @@ from .session_model import save_model_config
 from .encounters import normalize, parse_entry, clean_labels, UNKNOWN
 from .word_export import chronology_docx
 from .output_safety import validate_destination
-from .companion_reports import generate_reports
+from .companion_reports import generate_reports, COMPANION_PROTOCOL
+
+EXPORT_PROTOCOL = "medical-workspace-export-v2"
 
 
 def issue_for(document, kind, reason, pages=(), **extra):
@@ -713,7 +715,7 @@ class MedicalRun:
             for d in docs
             for x in d.get("exclusions", [])
         ]
-        companion_signature = digest([entries, self.case["model"]])
+        companion_signature = digest([COMPANION_PROTOCOL, entries, self.case["model"]])
         companion_error = None
         try:
             companion_files = generate_reports(
@@ -754,6 +756,7 @@ class MedicalRun:
         pending = [i for i in issues if i["status"] in ("open", "deferred")]
         version = digest(
             [
+                EXPORT_PROTOCOL,
                 PROTOCOL,
                 entries,
                 docs,
@@ -782,6 +785,8 @@ class MedicalRun:
             if pending
             else "Draft—human source review required before final use.\n\n"
         )
+        if pending and all(i.get("kind") == "companion_report" for i in pending):
+            notice = "Draft complete—companion report review required. The detailed chronology is preserved; see the review report.\n\n"
         text = header + notice + "\n\n".join(e["text"] for e in entries)
         docnames = {d["id"]: d["path"] for d in docs}
 
@@ -919,6 +924,12 @@ class MedicalRun:
         state = self.store.sessions.load(self.case_id)
         state.status = "in_progress"
         state.last_error = None
+        for name in ("header", "summary", "upload"):
+            phase = state.phases[name]
+            phase.status = "pending"
+            phase.started_at = None
+            phase.completed_at = None
+            phase.error = None
         self.store.sessions.save(state)
         if action == "run":
             self.checkpoint("Checking the saved source inventory")
