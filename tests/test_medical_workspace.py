@@ -1001,3 +1001,69 @@ def test_citation_presentation_matching_does_not_change_clinical_content(source,
 
     with pytest.raises(EvidenceReview):
         exact_evidence([{"page": 1, "quote": quote}], {1: source, 2: quote})
+
+
+@pytest.mark.parametrize("separator", [" – ", " — ", " - "])
+def test_composite_service_title_requires_both_exact_parts_on_the_same_page(separator):
+    from src.medical_evidence import service_title_supported
+
+    description = "follow-up orthopedic evaluation via telemedicine"
+    title = "Progress Note" + separator + description
+    page = (
+        "Seen today for a "
+        + description
+        + ".\nProgress Note: Avery Example, MD 03/20/2026"
+    )
+    assert service_title_supported(title, [page])
+    assert not service_title_supported(
+        title, [page.split("\n")[0], page.split("\n")[1]]
+    )
+    assert not service_title_supported(title.replace("telemedicine", "surgery"), [page])
+    assert not service_title_supported(
+        title.replace("Progress Note", "Procedure Note"), [page]
+    )
+    assert not service_title_supported(
+        "Progress Note – orthopedic – telemedicine", [page]
+    )
+
+
+def test_composite_title_reaches_the_independent_clinical_audit(tmp_path):
+    text = (
+        TEXT
+        + "\nSeen for a follow-up orthopedic evaluation.\nProgress Note: Avery Example, MD 02/05/2026"
+    )
+    data = response()
+    data["sections"][0]["entries"][0][
+        "service_name"
+    ] = "Progress Note – follow-up orthopedic evaluation"
+    prompts = []
+
+    def call(prompt, **kwargs):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return json.dumps(data)
+        candidate = json.loads(prompt[prompt.index('{"policy"') :])["candidate"]
+        return json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": e["id"],
+                        "verdict": "uncertain",
+                        "reason": "The encounter attribution needs source review.",
+                    }
+                    for e in candidate["entries"]
+                ],
+                "missing_encounters": [],
+            }
+        )
+
+    result = extract_group(
+        [{"page": 1, "text": text}],
+        CASE,
+        MEDICAL_POLICY,
+        DOC,
+        call,
+        tmp_path / "extract.json",
+    )
+    assert len(prompts) == 2
+    assert not result["entries"] and result["reviews"]
