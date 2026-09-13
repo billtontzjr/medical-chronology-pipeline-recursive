@@ -48,3 +48,13 @@ Run `python -m pytest -q` using the repository environment. Fixtures are fiction
 For a read-only visual preview, run `python scripts/seed_workspace_preview.py /tmp/medical-preview` in an environment with ReportLab, then `python preview_workspace.py --data-dir /tmp/medical-preview --port 8765`. Use an empty fixture directory. The preview binds only to loopback and disables mutations and external calls. Its files are fictional examples, not generated clinical findings.
 
 Physical-page navigation and exact excerpts are available. OCR coordinate highlighting is not implemented because current extraction does not retain word boxes. The reference-format patterns have local structural and synthetic render checks. A real generated chronology still requires source-reviewed benchmark acceptance; synthetic checks are not a replacement for that gate.
+
+## Team review choices
+
+The primary **What should happen next?** dropdown offers **Rerun it and include it in the chronology** and **Exclude it**. These choices apply to the entire selected source document, including all of its entries and related flags. Reviewer name is required; notes are optional. Save multiple decisions, then use Run / Resume once to rebuild the chronology and exports. Existing downloaded versions are immutable.
+
+Exclusion preserves the original, prior results, source hash, reviewer and decision history, and lists the document in the excluded inventory. It bypasses generation for that exact excluded source version. Rerun removes that exclusion and repeats source checks with a new document revision; cached OCR is reused unless the reviewed issue is an OCR failure. Inclusion is conditional on passing evidence checks. A later source change invalidates the decision. Additional correction, deferral and undo tools remain collapsed under More review tools.
+
+The new-case model dropdown offers Anthropic Claude Opus 5, Anthropic Claude Fable 5.1 and OpenAI GPT-6 Astra. Opus 5 is labeled the tested starting point; there is no claim that Fable or Astra outperforms it on these case benchmarks. Provider adapters retain their existing Responses/Anthropic routing and saved-case model protection. Model documentation: https://platform.claude.com/docs/en/models/fable-5-1/overview and https://developers.openai.com/api/docs/models/gpt-6-astra.
+
+Identity parsing reads only the patient-name field. A blank Patient label does not consume an address on the next line; adjacent policy/service-date columns are excluded from the name. Wrong patient names and conflicting DOB evidence remain review failures. Evidence protocol v5 preserves earlier results instead of treating them as reverified.

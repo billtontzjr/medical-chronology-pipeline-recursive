@@ -14,7 +14,7 @@ from .response_recovery import capture_responses, IncompleteResponseError
 from .deposition import transcript_structure
 from .chronology_scope import _has_medical_content
 
-PROTOCOL = "medical-page-evidence-v4"
+PROTOCOL = "medical-page-evidence-v5"
 PAGE_LIMIT = 48000
 CLINICAL = {"clinical_care", "medical_evaluation", "diagnostic_test", "medical_billing"}
 EXCLUDED = {
@@ -189,6 +189,23 @@ def supports_encounter_date(quote, date, unit):
     ):
         return True
     return supports_service_date(quote, date, unit)
+
+
+def explicit_patient_names(text):
+    """Read the name field, not a following address or adjacent policy column."""
+    names = []
+    for match in re.finditer(
+        r"(?im)^[ \t]*Patient(?: name)?[ \t]*:[ \t]*([^\r\n]*)", text
+    ):
+        value = re.split(
+            r"\s*(?:\||\b(?:DOB|Date of birth|MRN|Age|Sex|Policy|Service Date|Address|Phone|Patient ID)\s*[:#])\s*",
+            match[1],
+            maxsplit=1,
+            flags=re.I,
+        )[0].strip()
+        if value:
+            names.append(value)
+    return names
 
 
 def same_patient(actual, expected):
@@ -476,16 +493,11 @@ def validate_document(data, pages, case, policy, document, identity_context=()):
         reviewed_association = bool(
             confirmed and set(numbers).issubset(set(confirmed.get("pages", [])))
         )
-        explicit_names = []
-        for number, content in source.items():
-            for match in re.finditer(
-                r"(?im)^\s*Patient(?: name)?\s*:\s*([^\r\n]+)", content
-            ):
-                explicit_names.append(
-                    re.split(r"\s+(?:DOB|MRN|Age|Sex)\s*:", match[1], flags=re.I)[
-                        0
-                    ].strip()
-                )
+        explicit_names = [
+            name
+            for content in source.values()
+            for name in explicit_patient_names(content)
+        ]
         explicit_dobs = []
         for content in source.values():
             for match in re.finditer(

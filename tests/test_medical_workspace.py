@@ -1110,3 +1110,110 @@ def test_rerun_does_not_claim_previous_upload_completed_current_job(store):
         MedicalRun(store, pipeline, case["id"], stopping=pause_after_reset).run()
     assert store.all(case["id"], "artifacts") == original_artifacts
     assert calls == original_calls
+
+
+def test_patient_columns_do_not_invent_an_identity_mismatch():
+    from src.medical_evidence import explicit_patient_names
+
+    text = (
+        TEXT
+        + "\nPatient:\nAddress: Example Street\nPatient: Alex Jordan Example | Policy# TEST-ONLY | Service Date: 02/05/2026\n"
+    )
+    assert explicit_patient_names(text) == ["Alex Example", "Alex Jordan Example"]
+    result = validate_document(
+        response(), [{"page": 1, "text": text}], CASE, MEDICAL_POLICY, DOC
+    )
+    assert result["entries"] and not result["reviews"]
+    wrong = text + "Patient: Robin Other | Policy# TEST-ONLY\n"
+    result = validate_document(
+        response(), [{"page": 1, "text": wrong}], CASE, MEDICAL_POLICY, DOC
+    )
+    assert not result["entries"]
+    assert any(i["kind"] == "patient_identity" for i in result["reviews"])
+
+
+def test_exclude_document_persists_without_ocr_and_is_reversible(store):
+    from src.medical_run import issue_for
+
+    case, pipeline, calls = prepared_pipeline(store)
+    cid = case["id"]
+    MedicalRun(store, pipeline, cid).run()
+    doc = store.all(cid, "documents")[0]
+    original = (store.directory(cid) / "input" / "record.pdf").read_bytes()
+    old_artifacts = store.all(cid, "artifacts")
+    for kind in ("coverage", "date"):
+        issue = issue_for(doc, kind, "Fictional unresolved question", [1])
+        store.put(cid, "issues", issue["id"], issue)
+    store.put(
+        cid,
+        "issues",
+        "unrelated",
+        {"id": "unrelated", "document_id": "other", "status": "open", "kind": "date"},
+    )
+    event = review_source(
+        store,
+        cid,
+        {
+            "target": issue["id"],
+            "fingerprint": issue["fingerprint"],
+            "action": "exclude",
+            "reviewer": "Test Reviewer",
+        },
+    )
+    assert not store.all(cid, "entries")
+    assert store.all(cid, "issues") == [
+        {"id": "unrelated", "document_id": "other", "status": "open", "kind": "date"}
+    ]
+    assert store.all(cid, "artifacts") == old_artifacts
+    assert store.get(cid, "document_history", doc["id"] + "-" + event["id"])["entries"]
+    # Remove only the synthetic unrelated issue before exporting the fixture.
+    with store.connect() as db:
+        db.execute(
+            "DELETE FROM records WHERE case_id=? AND kind='issues' AND id='unrelated'",
+            (cid,),
+        )
+    before = dict(calls)
+    MedicalRun(store, pipeline, cid).run()
+    assert calls["ocr"] == before["ocr"] and calls["model"] == before["model"]
+    excluded = store.all(cid, "documents")[0]
+    assert excluded["status"] == "excluded"
+    output = json.loads(
+        (store.directory(cid) / "output" / "chronology.json").read_text()
+    )
+    assert not output["records"] and not output["manual_reviews"]
+    assert output["excluded_materials"][0]["reviewer"] == "Test Reviewer"
+    review_source(
+        store,
+        cid,
+        {
+            "target": excluded["id"],
+            "fingerprint": excluded["fingerprint"],
+            "action": "rerun_include",
+            "reviewer": "Test Reviewer",
+        },
+    )
+    MedicalRun(store, pipeline, cid).run()
+    assert store.all(cid, "entries")
+    assert calls["ocr"] == before["ocr"] and calls["model"] > before["model"]
+    assert (store.directory(cid) / "input" / "record.pdf").read_bytes() == original
+    assert {h["action"] for h in store.history(cid)} == {"exclude", "rerun_include"}
+
+
+def test_exclusion_cannot_hide_a_changed_original(store):
+    case, pipeline, _ = prepared_pipeline(store)
+    cid = case["id"]
+    MedicalRun(store, pipeline, cid).run()
+    doc = store.all(cid, "documents")[0]
+    review_source(
+        store,
+        cid,
+        {
+            "target": doc["id"],
+            "fingerprint": doc["sha256"],
+            "action": "exclude",
+            "reviewer": "Test Reviewer",
+        },
+    )
+    (store.directory(cid) / "input" / "record.pdf").write_bytes(b"changed")
+    with pytest.raises(ValueError, match="different source version"):
+        MedicalRun(store, pipeline, cid).generate_document(doc)
