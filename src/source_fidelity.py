@@ -18,24 +18,28 @@ class DiagnosticStructureError(DiagnosticEvidenceError):
     """Invalid evidence structure or source IDs cannot be deferred as uncertainty."""
 
 
-RESULT_LABEL = re.compile(r'^(?:Impression|Conclusion|Interpretation|Findings|Results)\s*:', re.I)
+RESULT_LABEL = re.compile(r'^(?:Impression|Conclusion|Interpretation|Findings|Results)(?:[ \t]*:[ \t]*|[ \t]*(?:\r?\n|$))', re.I)
 PAGE_BOUNDARY = re.compile(r'(?m)^=== (?:SOURCE )?PDF PAGE \d+ ===\s*$|\f')
 
 
-def _result_sections(unit):
+def _result_sections(unit, provider=''):
     """Retain whole labeled result sections, not an arbitrary prefix."""
     sections, current = [], []
     for line in unit.splitlines():
         line = line.strip()
+        if current and provider and _provider_key(line) == _provider_key(provider):
+            sections.append(' '.join(current))
+            current = []
+            continue
         heading = re.match(r'^[A-Za-z][A-Za-z /-]{1,50}:', line)
-        if heading and current:
+        if (heading or RESULT_LABEL.match(line)) and current:
             sections.append(' '.join(current))
             current = []
         if RESULT_LABEL.match(line) or current:
             current.append(line)
     if current:
         sections.append(' '.join(current))
-    preferred = [s for s in sections if re.match(r'^(?:Impression|Conclusion|Interpretation)\s*:', s, re.I)]
+    preferred = [s for s in sections if re.match(r'^(?:Impression|Conclusion|Interpretation)(?:\s*:|\s+)', s, re.I)]
     return preferred or sections
 
 
@@ -49,12 +53,45 @@ def _attribution_supported(field, value, unit, content):
         return _normalize(value) in {_normalize(v) for v in local_values}
     if all_values:
         return all_values == {_normalize(value)}
+    if field == 'provider':
+        return (_normalize(value) in _normalize(unit)
+                or _provider_key(value) in {_provider_key(line.strip()) for line in unit.splitlines()})
     return _normalize(value) in _normalize(unit)
+
+
+def _provider_key(value):
+    """Compare a complete standalone signature, allowing credential punctuation."""
+    return re.sub(r'[^\w]', '', value).casefold()
 
 
 def _normalize(text):
     # Preserve punctuation and words; only OCR whitespace/case can differ.
     return ' '.join(text.split()).casefold()
+
+
+def _study_key(text):
+    text = re.sub(r'\bmagnetic resonance imaging\b|\bMR\b', 'MRI', text, flags=re.I)
+    return sorted(w for w in re.findall(r'[a-z0-9]+', text.casefold()) if w not in {'of', 'the'})
+
+
+def _report_header(unit, content, study, date_quote, date):
+    """Link a continuation to its own dated, named report header.
+
+    The result page must repeat the patient, examination and service date.
+    This never borrows a missing date from a different page or permits a
+    differently named study merely because it occurs in the same PDF.
+    """
+    names = lambda page: {re.sub(r'[^\w]', '', name).casefold() for name in
+        re.findall(r'(?im)^\s*Patient\s*:\s*([^\r\n]+)', page)}
+    patient = names(unit)
+    examinations = re.findall(r'(?im)^\s*(?:Exam|Study)\s*:\s*([^\r\n]+)', unit)
+    if len(patient) != 1 or not any(_study_key(value) == _study_key(study) for value in examinations):
+        return ''
+    for _, header in page_units(content):
+        if (names(header) == patient and _normalize(study) in _normalize(header)
+                and supports_service_date(date_quote, date, header)):
+            return header
+    return ''
 
 
 def validate_diagnostic_structure(entry, documents):
@@ -110,7 +147,8 @@ def render_diagnostic(entry, documents):
         if date_value(date_quote) is None:
             reject('the quoted date does not establish this diagnostic service date.',
                    'unsupported_date_field')
-        if not RESULT_LABEL.match(quote.strip()) or not quote.split(':', 1)[1].strip():
+        result_label = RESULT_LABEL.match(quote.strip())
+        if not result_label or not quote.strip()[result_label.end():].strip():
             reject('quote the labeled result section, not a new indication or plan.',
                    'missing_result_label')
         document = documents[sid]
@@ -122,12 +160,14 @@ def render_diagnostic(entry, documents):
         supported, failures = [], set()
         for _, unit in page_units(content):
             normalized = _normalize(unit)
+            header = _report_header(unit, content, result['study'], date_quote, date)
             checks = {
                 'service_date_not_established': supports_service_date(date_quote, date, unit, corroborating_dates=document.get("corroborating_dates", ())),
-                'study_not_on_result_page': _normalize(result['study']) in normalized,
+                'study_not_on_result_page': _normalize(result['study']) in normalized or bool(header),
                 'result_not_complete_on_page': _normalize(quote) in {
-                    _normalize(section) for section in _result_sections(unit)},
-                'facility_not_supported': _attribution_supported('facility', result['facility'], unit, attribution),
+                    _normalize(section) for section in _result_sections(unit, result['provider'])},
+                'facility_not_supported': _attribution_supported('facility', result['facility'], unit, attribution)
+                    or bool(header and _attribution_supported('facility', result['facility'], header, attribution)),
                 'provider_not_supported': _attribution_supported('provider', result['provider'], unit, attribution),
             }
             if not all(checks.values()):

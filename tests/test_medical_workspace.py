@@ -1374,6 +1374,20 @@ def test_patient_columns_do_not_invent_an_identity_mismatch():
     assert any(i["kind"] == "patient_identity" for i in result["reviews"])
 
 
+@pytest.mark.parametrize("column", ["Record Id : TEST123", "Record Number: TEST123", "Age / Gender : 46 / M"])
+def test_patient_name_stops_at_labeled_adjacent_record_column(column):
+    from src.medical_evidence import explicit_patient_names
+
+    text = TEXT + "\nPatient : Alex Jordan Example                 " + column + "\n"
+    assert explicit_patient_names(text)[-1] == "Alex Jordan Example"
+    result = validate_document(response(), [{"page": 1, "text": text}], CASE, MEDICAL_POLICY, DOC)
+    assert result["entries"] and not result["reviews"]
+    wrong = text.replace("Patient : Alex Jordan Example", "Patient : Robin Other")
+    rejected = validate_document(response(), [{"page": 1, "text": wrong}], CASE, MEDICAL_POLICY, DOC)
+    assert not rejected["entries"]
+    assert rejected["reviews"][0]["kind"] == "patient_identity"
+
+
 def test_exclude_document_persists_without_ocr_and_is_reversible(store):
     from src.medical_run import issue_for
 

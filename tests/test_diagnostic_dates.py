@@ -135,3 +135,50 @@ def test_wrong_result_page_and_wrong_provider_still_fail():
             candidate['diagnostic_result']['evidence'][0]['quote'] = 'Impression: No acute'
         with pytest.raises(DiagnosticEvidenceError):
             render_diagnostic(candidate, {'D001': doc})
+
+
+@pytest.mark.parametrize('heading', ['IMPRESSION', 'Conclusion', 'Interpretation'])
+def test_standalone_original_result_heading_does_not_require_invented_colon(heading):
+    field = 'Study Date: 01/12/2026'
+    quote = heading + '\nNo acute fracture.\nNo canal stenosis.'
+    doc = document(field)
+    doc['content'] = doc['content'].replace('Impression: No acute fracture.', quote)
+    candidate = entry(field)
+    candidate['diagnostic_result']['evidence'][0]['quote'] = quote
+    assert render_diagnostic(candidate, {'D001': doc}).startswith(DATE)
+    candidate['diagnostic_result']['evidence'][0]['quote'] = heading + '\nNo acute fracture.'
+    with pytest.raises(DiagnosticEvidenceError):
+        render_diagnostic(candidate, {'D001': doc})
+
+
+def test_complete_impression_ends_at_the_matching_radiologist_signature():
+    field = 'Study Date: 01/12/2026'
+    quote = 'IMPRESSION\nNo acute fracture.\nNo canal stenosis.'
+    doc = document(field)
+    doc['content'] = doc['content'].replace('Provider: Example, MD\n', '')
+    doc['content'] = doc['content'].replace('Impression: No acute fracture.',
+        quote + '\n\nExample, M. D.\nBoard-certified radiologist\nD: 01/12/26\nT: 01/13/26')
+    candidate = entry(field)
+    candidate['diagnostic_result']['evidence'][0]['quote'] = quote
+    assert render_diagnostic(candidate, {'D001': doc}).startswith(DATE)
+    candidate['diagnostic_result']['provider'] = 'Other, MD'
+    with pytest.raises(DiagnosticEvidenceError):
+        render_diagnostic(candidate, {'D001': doc})
+
+
+def test_dated_named_mri_continuation_links_to_its_own_report_header():
+    field = 'DATE: 01/12/2026'
+    study = 'MAGNETIC RESONANCE IMAGING OF THE LUMBAR SPINE'
+    quote = 'IMPRESSION\nNo acute fracture.\nNo canal stenosis.'
+    header = '=== SOURCE PDF PAGE 1 ===\nSynthetic Imaging\nPATIENT: EXAMPLE, ALEX\n' + field + '\n' + study
+    continuation = '\n=== SOURCE PDF PAGE 2 ===\nPATIENT: EXAMPLE, ALEX\nEXAM: LUMBAR SPINE - MR\n' + field + '\n' + quote + '\n\nExample, M. D.'
+    candidate = entry(field)
+    candidate['diagnostic_result'].update(study=study)
+    candidate['diagnostic_result']['evidence'][0]['quote'] = quote
+    assert render_diagnostic(candidate, {'D001': {'content': header + continuation}}).startswith(DATE)
+    for altered in [continuation.replace('EXAMPLE, ALEX', 'OTHER, ROBIN'),
+                    continuation.replace('LUMBAR SPINE', 'CERVICAL SPINE'),
+                    continuation.replace(field, 'DATE: 01/19/2026'),
+                    continuation.replace(field, '')]:
+        with pytest.raises(DiagnosticEvidenceError):
+            render_diagnostic(candidate, {'D001': {'content': header + altered}})

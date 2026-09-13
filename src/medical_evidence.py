@@ -16,7 +16,7 @@ from .deposition import transcript_structure
 from .chronology_scope import _has_medical_content
 
 PROTOCOL = "medical-page-evidence-v8"
-VALIDATION_VERSION = "medical-source-validation-v2"
+VALIDATION_VERSION = "medical-source-validation-v3"
 PAGE_LIMIT = 48000
 CLINICAL = {"clinical_care", "medical_evaluation", "diagnostic_test", "medical_billing"}
 EXCLUDED = {
@@ -211,7 +211,7 @@ def explicit_patient_names(text):
         r"(?im)^[ \t]*Patient(?: name)?[ \t]*:[ \t]*([^\r\n]*)", text
     ):
         value = re.split(
-            r"\s*(?:\||\b(?:DOB|Date of birth|MRN|Age|Sex|Policy|Service Date|Address|Phone|Patient ID)\s*[:#])\s*",
+            r"\s*(?:\||\b(?:DOB|Date of birth|MRN|Age(?:\s*/\s*Gender)?|Sex|Policy|Service Date|Address|Phone|Patient ID|Record\s+(?:Id|Number))\s*[:#])\s*",
             match[1],
             maxsplit=1,
             flags=re.I,
