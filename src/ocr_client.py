@@ -12,12 +12,25 @@ from typing import Dict, List, Callable, Optional
 import httpx
 from pdf2image import convert_from_path
 from PIL import Image
+from .blank_pages import assess_blank
 
 
 class OCRClient:
     """Handle OCR processing using Google Cloud Vision API."""
 
     protocol = "vision-layout-300-v1"
+
+    def inspect_blank_page(self, file_path, page):
+        """Inspect only a saved no-text page; no OCR call or source mutation."""
+        images = []
+        try:
+            images = convert_from_path(file_path, dpi=300, first_page=page, last_page=page, fmt='png')
+            return assess_blank(images[0]) if len(images) == 1 else {'blank': False}
+        except Exception:
+            return {'blank': False, 'error': 'Original page could not be assessed'}
+        finally:
+            for image in images:
+                image.close()
 
     def __init__(self, api_key: str):
         """

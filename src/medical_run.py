@@ -464,6 +464,20 @@ class MedicalRun:
                 "ocr",
             )
         pages = [{"page": n, "text": text} for n, text in page_units(raw)]
+        # A no-text OCR result is not itself evidence of blankness. Inspect the
+        # original full page separately; retain the original OCR sidecar/text.
+        inspect_blank = getattr(self.pipeline.ocr_client, "inspect_blank_page", None)
+        if inspect_blank:
+            for page in doc["pages"]:
+                if page.get("status") != "no_text":
+                    continue
+                assessment = inspect_blank(str(source), page["page"])
+                page["blank_assessment"] = {**assessment, "source_sha256": doc["sha256"]}
+                if assessment.get("blank"):
+                    page["status"] = "blank"
+                    if not any(p["page"] == page["page"] for p in pages):
+                        pages.append({"page": page["page"], "text":
+                            f"=== SOURCE PDF PAGE {page['page']} ===\n[Blank page: only isolated scan speckles detected]"})
         corrections = override.get("corrections", {})
         for page, text in corrections.items():
             p = next((p for p in pages if p["page"] == int(page)), None)
@@ -479,7 +493,7 @@ class MedicalRun:
         known = {p["page"] for p in pages}
         unread = [
             p["page"]
-            for p in report.get("pages", [])
+            for p in doc["pages"]
             if p["status"] not in ("text", "blank") and str(p["page"]) not in corrections
         ]
         if (
