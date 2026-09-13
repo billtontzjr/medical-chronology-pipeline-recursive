@@ -9,6 +9,7 @@ from pathlib import Path
 from aiohttp import web
 from .case_store import CaseStore, digest
 from .source_pages import page_units
+from .source_preview import render_source_page
 
 
 class WorkspaceAPI:
@@ -17,6 +18,7 @@ class WorkspaceAPI:
         self.store = CaseStore(base_dir)
         self.preview = preview
         self.pipeline_factory = pipeline_factory
+        self.preview_slots = asyncio.Semaphore(2)
 
     def pipeline(self, model=None):
         if self.pipeline_factory:
@@ -217,6 +219,24 @@ class WorkspaceAPI:
             action = parts[2]
             if request.method == "GET" and action == "sources" and len(parts) >= 4:
                 doc = await asyncio.to_thread(self.document, case_id, parts[3])
+                if (
+                    len(parts) == 6
+                    and parts[4] == "pages"
+                    and parts[5].endswith(".png")
+                ):
+                    original = self.store.file(case_id, "input", doc["path"])
+                    async with self.preview_slots:
+                        image = await asyncio.to_thread(
+                            render_source_page,
+                            original,
+                            int(parts[5].removesuffix(".png")),
+                            doc.get("sha256"),
+                        )
+                    return web.Response(
+                        body=image,
+                        content_type="image/png",
+                        headers={"Cache-Control": "no-store"},
+                    )
                 if len(parts) == 5 and parts[4] == "text":
                     return web.json_response(
                         await asyncio.to_thread(

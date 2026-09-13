@@ -21,6 +21,7 @@ const state = {
   selected: null,
   sourceMode: "pdf",
   comparison: null,
+  comparisonPages: {},
   preview: false,
 };
 const api = async (path = "", data) => {
@@ -52,6 +53,7 @@ const labels = {
   paused: "Paused",
   recovery_required: "Recovery needed",
   open: "Needs review",
+  needs_review: "Needs review",
   deferred: "Deferred",
   resolved: "Resolved",
   included: "Medical record",
@@ -64,7 +66,7 @@ const statusBadge = (s) =>
     labels[s] || s,
     ["failed", "recovery_required"].includes(s)
       ? "red"
-      : ["open", "deferred", "paused"].includes(s)
+      : ["open", "needs_review", "deferred", "paused"].includes(s)
         ? "amber"
         : ["complete", "included", "resolved", "verified"].includes(s)
           ? "teal"
@@ -78,6 +80,10 @@ function toast(text) {
 }
 function fileURL(doc, page = 1) {
   return `/api/workspace/cases/${encodeURIComponent(state.detail.id)}/sources/${encodeURIComponent(doc.id)}#page=${Number(page) || 1}`;
+}
+function pagePreview(doc, page) {
+  const url = fileURL(doc).split("#")[0] + `/pages/${Number(page) || 1}.png`;
+  return `<div class="pdf-page"><p class="page-message" role="status">Loading original page…</p><a href="${url}" target="_blank" rel="noopener" aria-label="Enlarge original page ${page} of ${esc(doc.path)}"><img class="source-page-image" src="${url}" alt="Original PDF ${esc(doc.path)}, physical page ${page}" hidden></a></div>`;
 }
 function metrics(items) {
   return `<div class="metrics">${items.map(([n, l, d]) => `<div class="metric"><span class="label">${l}</span><span class="number">${esc(n)}</span><div class="detail">${d}</div></div>`).join("")}</div>`;
@@ -160,7 +166,7 @@ function sourcePanel() {
   if (!d)
     return '<div class="empty">Choose an entry or record to see its original source.</div>';
   const page = state.selected?.evidence?.[0]?.page || state.selected?.page || 1;
-  return `<aside class="card sourcepanel" aria-label="Original source"><div class="sourcehead"><div class="sectionbar"><h3>Original source</h3><div class="actions"><button data-action="source-mode" data-mode="pdf" aria-pressed="${state.sourceMode === "pdf"}">PDF</button><button data-action="source-mode" data-mode="text" aria-pressed="${state.sourceMode === "text"}">OCR text</button></div></div><p>${esc(d.path)} · ${d.page_count ? d.page_count + " pages" : "Page count unknown"}</p><div class="actions" style="margin-top:12px"><label style="margin:0">PDF page <select id="source-page" aria-label="Physical PDF page" style="width:85px;display:inline-block">${Array.from({ length: d.page_count || 1 }, (_, i) => `<option ${i + 1 === page ? "selected" : ""}>${i + 1}</option>`).join("")}</select></label><a href="${fileURL(d, page)}" target="_blank" rel="noopener">Open original ↗</a></div>${state.selected?.quote ? `<details><summary>Supporting passage</summary><p class="small">${esc(state.selected.quote)}</p></details>` : ""}</div>${state.sourceMode === "pdf" ? `<iframe title="Original PDF: ${esc(d.path)}" src="${fileURL(d, page)}"></iframe>` : `<pre>${esc((d.pages || []).find((p) => p.page === page)?.text || "No reliable OCR text for this page. Check the original PDF.")}</pre>`}</aside>`;
+  return `<aside class="card sourcepanel" aria-label="Original source"><div class="sourcehead"><div class="sectionbar"><h3>Original source</h3><div class="actions"><button data-action="source-mode" data-mode="pdf" aria-pressed="${state.sourceMode === "pdf"}">PDF</button><button data-action="source-mode" data-mode="text" aria-pressed="${state.sourceMode === "text"}">OCR text</button></div></div><p>${esc(d.path)} · ${d.page_count ? d.page_count + " pages" : "Page count unknown"}</p><div class="actions" style="margin-top:12px"><label style="margin:0">PDF page <select id="source-page" aria-label="Physical PDF page" style="width:85px;display:inline-block">${Array.from({ length: d.page_count || 1 }, (_, i) => `<option ${i + 1 === page ? "selected" : ""}>${i + 1}</option>`).join("")}</select></label><a href="${fileURL(d, page)}" target="_blank" rel="noopener">Open original ↗</a></div>${state.selected?.quote ? `<details><summary>Supporting passage</summary><p class="small">${esc(state.selected.quote)}</p></details>` : ""}</div>${state.sourceMode === "pdf" ? pagePreview(d, page) : `<pre>${esc((d.pages || []).find((p) => p.page === page)?.text || "No reliable OCR text for this page. Check the original PDF.")}</pre>`}</aside>`;
 }
 function records() {
   const c = state.detail;
@@ -225,7 +231,12 @@ function compareView() {
   const docs = state.comparison
     .map((id) => state.detail.documents.find((d) => d.id === id))
     .filter(Boolean);
-  return `<div class="sectionbar"><div><h2>Compare original records</h2><p class="small muted">Check dates, signatures, findings and revisions before deciding whether these are duplicates.</p></div><button data-action="close-compare">Back to records</button></div><div class="workspace">${docs.map((d) => `<div class="card sourcepanel"><div class="sourcehead"><h3>${esc(d.path)}</h3><p>Source version ${esc(d.sha256?.slice(0, 12) || "unknown")}</p><a target="_blank" rel="noopener" href="${fileURL(d)}">Open original ↗</a></div><iframe title="Original PDF ${esc(d.path)}" src="${fileURL(d)}"></iframe></div>`).join("")}</div>`;
+  return `<div class="sectionbar"><div><h2>Compare original records</h2><p class="small muted">Check dates, signatures, findings and revisions before deciding whether these are duplicates.</p></div><button data-action="close-compare">Back to records</button></div><div class="workspace">${docs
+    .map((d) => {
+      const page = state.comparisonPages[d.id] || 1;
+      return `<div class="card sourcepanel"><div class="sourcehead"><h3>${esc(d.path)}</h3><p>Source version ${esc(d.sha256?.slice(0, 12) || "unknown")}</p><div class="actions"><label>PDF page <select data-compare-page="${esc(d.id)}" aria-label="Physical PDF page for ${esc(d.path)}">${Array.from({ length: d.page_count || 1 }, (_, i) => `<option ${i + 1 === page ? "selected" : ""}>${i + 1}</option>`).join("")}</select></label><a target="_blank" rel="noopener" href="${fileURL(d, page)}">Open original ↗</a></div></div>${pagePreview(d, page)}</div>`;
+    })
+    .join("")}</div>`;
 }
 function render() {
   const focused = document.activeElement?.id,
@@ -257,10 +268,14 @@ async function openCase(id) {
   history.replaceState({}, "", "?case=" + encodeURIComponent(id));
   render();
 }
-function showDecision(target, action) {
+async function showDecision(target, action) {
+  state.selected = target;
+  if (state.sourceMode === "text") await loadSourceText();
+  render();
   const f = $("#decision-form");
   f.reset();
   f.elements.target.value = target.id;
+  if (target.page) f.elements.page.value = target.page;
   f.elements.fingerprint.value = target.fingerprint || target.sha256 || "";
   if (action) f.elements.action.value = action;
   $("#decision-context").textContent =
@@ -351,18 +366,20 @@ document.addEventListener("click", async (e) => {
       return;
     }
     if (a === "review") {
-      showDecision(state.detail.issues.find((x) => x.id === b.dataset.id));
+      await showDecision(
+        state.detail.issues.find((x) => x.id === b.dataset.id),
+      );
       return;
     }
     if (a === "restore-source") {
-      showDecision(
+      await showDecision(
         state.detail.documents.find((x) => x.id === b.dataset.id),
         "restore",
       );
       return;
     }
     if (a === "reconsider") {
-      showDecision(
+      await showDecision(
         state.detail.documents.find((x) => x.id === b.dataset.id),
         "reconsider",
       );
@@ -396,6 +413,13 @@ document.addEventListener("input", (e) => {
   }
 });
 document.addEventListener("change", async (e) => {
+  if (e.target.dataset.comparePage) {
+    state.comparisonPages[e.target.dataset.comparePage] = Number(
+      e.target.value,
+    );
+    render();
+    return;
+  }
   if (e.target.id === "source-page") {
     const d = selectedDoc();
     state.selected = { document_id: d.id, page: Number(e.target.value) };
@@ -465,3 +489,22 @@ const initial = new URLSearchParams(location.search).get("case");
     )),
 );
 setInterval(refresh, 12000);
+
+// Show an explicit fallback instead of a blank pane when a PDF cannot render.
+for (const event of ["load", "error"]) {
+  document.addEventListener(
+    event,
+    (e) => {
+      if (!e.target.matches?.(".source-page-image")) return;
+      const message = e.target
+        .closest(".pdf-page")
+        .querySelector(".page-message");
+      e.target.hidden = event === "error";
+      message.hidden = event === "load";
+      if (event === "error")
+        message.textContent =
+          "Page preview unavailable. Use Open original to inspect the PDF.";
+    },
+    true,
+  );
+}

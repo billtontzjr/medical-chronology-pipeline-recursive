@@ -1,6 +1,9 @@
 """Exercise the actual gateway and case API with fictional files only."""
 
 import asyncio
+import hashlib
+from io import BytesIO
+from PIL import Image
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -120,19 +123,29 @@ def test_gateway_case_api_authentication_sources_jobs_and_archive(
                 case = await result.json()
                 assert case["policy"]["depositions"] is False
                 source = api.store.sessions.input_dir(case["id"]) / "source.pdf"
-                source.write_bytes(b"%PDF-fictional-source")
+                Image.new("RGB", (100, 120), "red").save(
+                    source,
+                    "PDF",
+                    save_all=True,
+                    append_images=[Image.new("RGB", (100, 120), "blue")],
+                )
+                original_bytes = source.read_bytes()
                 api.store.put(
                     case["id"],
                     "documents",
                     "doc1",
-                    {"id": "doc1", "path": "source.pdf", "status": "pending"},
+                    {
+                        "id": "doc1",
+                        "path": "source.pdf",
+                        "status": "pending",
+                        "sha256": hashlib.sha256(original_bytes).hexdigest(),
+                    },
                 )
                 response = await client.get(
                     base + "/" + case["id"] + "/sources/doc1", headers=auth
                 )
                 assert (
-                    response.status == 200
-                    and await response.read() == b"%PDF-fictional-source"
+                    response.status == 200 and await response.read() == original_bytes
                 )
                 assert (
                     response.headers["X-Frame-Options"] == "SAMEORIGIN"
@@ -146,6 +159,33 @@ def test_gateway_case_api_authentication_sources_jobs_and_archive(
                         base + "/" + case["id"] + "/sources/missing", headers=auth
                     )
                 ).status == 404
+                pages_url = base + "/" + case["id"] + "/sources/doc1/pages/"
+                assert (await client.get(pages_url + "1.png")).status == 401
+                for page, channel in [(1, 0), (2, 2)]:
+                    image_response = await client.get(
+                        pages_url + f"{page}.png", headers=auth
+                    )
+                    assert image_response.status == 200
+                    assert image_response.headers["Content-Type"] == "image/png"
+                    assert image_response.headers["Cache-Control"] == "no-store"
+                    with Image.open(BytesIO(await image_response.read())) as image:
+                        assert max(image.size) == 1600
+                        pixel = image.convert("RGB").getpixel((500, 500))
+                        assert pixel[channel] > 240 and sum(pixel) < 280
+                for page in ["0", "3", "100001", "invalid"]:
+                    assert (
+                        await client.get(pages_url + page + ".png", headers=auth)
+                    ).status == 400
+                assert (
+                    await client.get(
+                        base + "/other-case/sources/doc1/pages/1.png", headers=auth
+                    )
+                ).status == 404
+                source.write_bytes(original_bytes + b"changed")
+                assert (
+                    await client.get(pages_url + "1.png", headers=auth)
+                ).status == 409
+                source.write_bytes(original_bytes)
                 for _ in range(2):
                     response = await client.post(
                         base + "/" + case["id"] + "/run", json={}, headers=write
@@ -180,7 +220,7 @@ def test_gateway_case_api_authentication_sources_jobs_and_archive(
                         base + "/" + case["id"] + "/restore", json={}, headers=write
                     )
                 ).status == 200
-                assert source.read_bytes() == b"%PDF-fictional-source"
+                assert source.read_bytes() == original_bytes
                 assert (
                     await client.get(base + "/" + case["id"], headers=auth)
                 ).status == 200
