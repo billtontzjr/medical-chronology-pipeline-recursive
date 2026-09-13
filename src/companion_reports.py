@@ -5,7 +5,7 @@ from pathlib import Path
 from .medical_evidence import retained_call, FormatError, EvidenceReview
 from .case_store import digest
 
-COMPANION_PROTOCOL = "complete-treatment-overview-v2"
+COMPANION_PROTOCOL = "complete-treatment-overview-v3"
 
 
 def generate_reports(entries, call, folder):
@@ -80,13 +80,34 @@ def generate_reports(entries, call, folder):
                 )
             return data
 
-        retained_call(
-            Path(folder) / f"overview-{number}.audit.json",
-            audit_prompt,
-            call,
-            validate_audit,
-            8000,
-        )
+        try:
+            retained_call(
+                Path(folder) / f"overview-{number}.audit.json",
+                audit_prompt, call, validate_audit, 8000,
+            )
+        except EvidenceReview as exc:
+            if exc.kind != "companion_report":
+                raise
+            repair_prompt = prompt[:prompt.index("\n[")] + (
+                "\nRepair the rejected draft using only the supplied entries. "
+                "The checker feedback is a question to verify, not evidence. "
+                "Correct unsupported claims and recover omitted material; do not "
+                "change the underlying chronology or invent facts to satisfy the checker. "
+                "Return the same JSON schema and every entry ID exactly once.\n"
+                + json.dumps({"rejected_draft": partial, "checker_feedback": str(exc)}, ensure_ascii=False)
+                + "\n" + json.dumps(group, ensure_ascii=False)
+            )
+            partial = retained_call(
+                Path(folder) / f"overview-{number}.repair.json",
+                repair_prompt, call, validate, 8000,
+            )
+            repaired_audit = audit_prompt[:audit_prompt.index("\n{")] + "\n" + json.dumps(
+                {"entries": group, "companion": partial}, ensure_ascii=False
+            )
+            retained_call(
+                Path(folder) / f"overview-{number}.repair.audit.json",
+                repaired_audit, call, validate_audit, 8000,
+            )
         partials.append(partial)
     # Preserve all group overviews; no lossy second aggregation or hidden size cap.
     # Large cases receive a chronological multi-paragraph overview.

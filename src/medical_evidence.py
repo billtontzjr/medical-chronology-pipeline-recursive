@@ -250,10 +250,25 @@ def explicit_birth_dates(text):
     }
 
 
-def injury_date_from_source(text):
-    dates = set()
-    for match in re.finditer(r"(?im)(?:date of (?:injury|accident)|(?:injury|accident) date)\s*:\s*([^\n]+)", text):
-        dates.update(full_dates(match[1]))
+def injury_date_evidence(text, corroborating_dates=()):
+    """Read explicit injury fields, retaining conflicts and their exact spans."""
+    token = r"\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/-]\d{1,2}[/-](?:\d{4}|\d{2})|[A-Za-z]+[ \t]+\d{1,2},?[ \t]+\d{4}"
+    pattern = re.compile(
+        r"(?:^|\n|[ \t]{3,})(?P<quote>[ \t]*(?:date of (?:injury|accident)|"
+        r"(?:injury|accident) date|DOI|Auto Accident[ \t]*[-–—][ \t]*Date)"
+        r"[ \t]*:[ \t]*(?P<date>" + token + r")(?![\w/-]))"
+        r"[ \t]*(?=$|\r?\n|;|\||[A-Za-z]+[ \t]*:)", re.I,
+    )
+    result = []
+    for match in pattern.finditer(text):
+        date = resolve_source_date(match['date'], corroborating_dates)
+        if date:
+            result.append({"date": date, "quote": match['quote'].strip()})
+    return result
+
+
+def injury_date_from_source(text, corroborating_dates=()):
+    dates = {item['date'] for item in injury_date_evidence(text, corroborating_dates)}
     return next(iter(dates)) if len(dates) == 1 else ""
 
 
@@ -792,7 +807,7 @@ def validate_document(data, pages, case, policy, document, identity_context=()):
                     for e in evidence
                 ],
                 "identity_evidence": identity_refs,
-                "source_patient": {"name": name, "dob": dob, "doi": injury_date_from_source("\n".join(source.values()))},
+                "source_patient": {"name": name, "dob": dob, "doi": injury_date_from_source("\n".join(source.values()), case.get("verified_service_dates", [])), "doi_evidence": [{"page": page, **ref} for page, text in source.items() for ref in injury_date_evidence(text, case.get("verified_service_dates", []))]},
                 "source_version": document["sha256"],
                 "therapy_role": record.get("therapy_role"),
                 "therapy_type": record.get("therapy_type"),
