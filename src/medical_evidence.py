@@ -14,7 +14,7 @@ from .response_recovery import capture_responses, IncompleteResponseError
 from .deposition import transcript_structure
 from .chronology_scope import _has_medical_content
 
-PROTOCOL = "medical-page-evidence-v3"
+PROTOCOL = "medical-page-evidence-v4"
 PAGE_LIMIT = 48000
 CLINICAL = {"clinical_care", "medical_evaluation", "diagnostic_test", "medical_billing"}
 EXCLUDED = {
@@ -287,6 +287,30 @@ def exact_evidence(items, pages):
             )
         result.append({"page": item["page"], "quote": original})
     return result
+
+
+def service_title_supported(value, pages):
+    """Allow a note heading plus one verbatim service description on that page.
+
+    This is a display composition, not permission to synthesize an encounter
+    type. Both parts must be present together; the full clinical audit still
+    checks whether the description belongs to the current encounter.
+    """
+    composite = re.fullmatch(
+        r"(Progress Note|Office Note|Procedure Note|Consultation Note)\s+[–—-]\s+(.+)",
+        value,
+        re.I,
+    )
+    for page in pages:
+        if source_quote(value, page):
+            return True
+        if (
+            composite
+            and re.search(r"(?im)^\s*" + re.escape(composite[1]) + r"\s*:", page)
+            and source_quote(composite[2], page)
+        ):
+            return True
+    return False
 
 
 def retained_call(path, prompt, call, validate, budget=16000):
@@ -607,10 +631,19 @@ def validate_document(data, pages, case, policy, document, identity_context=()):
                 ]:
                     if not isinstance(value, str) or not value.strip():
                         raise FormatError("Supply the " + label + " header.")
-                    if value not in (
-                        "Facility not documented",
-                        "Provider not documented",
-                    ) and normalized(value) not in normalized(full):
+                    supported = (
+                        service_title_supported(value, source.values())
+                        if label == "Service"
+                        else normalized(value) in normalized(full)
+                    )
+                    if (
+                        value
+                        not in (
+                            "Facility not documented",
+                            "Provider not documented",
+                        )
+                        and not supported
+                    ):
                         raise EvidenceReview(
                             label
                             + " attribution is not present on the cited source pages.",
@@ -675,6 +708,8 @@ Return JSON {"sections":[{"pages":[1],"scope":"medical|excluded|review",
 "service_name":"exact source service name","body":"Clinical narrative without repeating the header",
 "evidence":[{"page":1,"quote":"exact supporting passage, include every material clause and qualification"}]}]}]}.
 Every page is assigned once. Excluded/review sections omit patient/entries.
+For multiple service dates, do not repeat the complete attendance-date list in body;
+the renderer adds that list. Preserve date-specific changes and treatment responses.
 For diagnostic_test omit body and supply diagnostic_result {"date":"MM/DD/YYYY",
 "facility":"exact facility","provider":"exact provider","study":"exact study",
 "evidence":[{"source_id":"D001","date_quote":"exact labeled exam date","quote":"complete labeled impression/result"}]}.
