@@ -693,7 +693,12 @@ def test_active_case_lock_preserves_state_when_duplicate_worker_attempts(store):
     assert store.job(case["id"])["status"] == "paused"
 
 
-def test_same_day_procedures_merge_all_sources_but_keep_other_provider(store):
+@pytest.mark.parametrize(
+    "merge_mode", ["valid", "format", "wrong_provider", "wrong_date"]
+)
+def test_same_day_procedures_merge_all_sources_but_keep_other_provider(
+    store, merge_mode
+):
     case, p, calls = prepared_pipeline(store)
     run = MedicalRun(store, p, case["id"])
     doc = run.inventory()[0]
@@ -721,12 +726,29 @@ def test_same_day_procedures_merge_all_sources_but_keep_other_provider(store):
     store.replace_document_result(case["id"], doc, [entry, second, third], [])
     merged_text = "02/05/2026. Example Clinic. Avery Example, MD. Evaluation and cervical injection. History: Neck pain without arm weakness. Examination: Upper extremity strength 5/5. Impression: Cervical strain. Procedure: Left C5-6 injection, tolerated without immediate complication. Plan: Physical therapy and follow-up in four weeks."
 
+    merge_calls = []
+
     def model(prompt, **kw):
         if prompt.startswith("Consolidate these source-checked"):
-            inputs = json.loads(prompt[prompt.index("\n[") + 1 :])
+            inputs = json.loads(
+                prompt[prompt.index("\n[") + 1 :].split("\nFORMAT CORRECTION:")[0]
+            )
             assert len(inputs) == 2
+            merge_calls.append(prompt)
+            proposed = merged_text
+            if merge_mode == "format" and len(merge_calls) == 1:
+                proposed = merged_text.replace(
+                    "02/05/2026. Example Clinic. Avery Example, MD.",
+                    "02/05/2026 — Avery Example, MD, Example Clinic:",
+                )
+            if merge_mode == "wrong_provider":
+                proposed = merged_text.replace(
+                    "Avery Example, MD", "Jordan Different, MD"
+                )
+            if merge_mode == "wrong_date":
+                proposed = merged_text.replace("02/05/2026.", "02/06/2026.", 1)
             return json.dumps(
-                {"text": merged_text, "covered_ids": [e["id"] for e in inputs]}
+                {"text": proposed, "covered_ids": [e["id"] for e in inputs]}
             )
         if prompt.startswith("Check this merged"):
             return json.dumps(
@@ -740,6 +762,13 @@ def test_same_day_procedures_merge_all_sources_but_keep_other_provider(store):
 
     p.chronology_agent._call_api_with_retry = model
     result = run.merged_entries()
+    assert len(merge_calls) == (2 if merge_mode == "format" else 1)
+    if merge_mode.startswith("wrong_"):
+        assert len(result) == 1 and result[0]["id"] == third["id"]
+        assert any(
+            i["kind"] == "same_day_merge" for i in store.all(case["id"], "issues")
+        )
+        return
     assert len(result) == 2
     merged = next(e for e in result if "merged_entry_ids" in e)
     assert set(merged["merged_entry_ids"]) == {entry["id"], second["id"]}
@@ -869,3 +898,106 @@ def test_incomplete_response_is_retained_and_not_retried_unchanged(tmp_path):
             )
     assert len(calls) == 1
     assert json.loads((tmp_path / "work.json").read_text())["status"] == "needs_review"
+
+
+@pytest.mark.parametrize("label", ["Dates of service", "Service dates", "Visit dates"])
+def test_grouped_therapy_accepts_discrete_dates_in_one_explicit_field(label):
+    dates = ["03/02/2026", "03/04/2026", "03/09/2026"]
+    field = label + ": " + ", ".join(dates) + "."
+    text = TEXT.replace("Date of service: 02/05/2026", field)
+    data = response()
+    entry = data["sections"][0]["entries"][0]
+    entry["service_dates"] = dates
+    entry["date_evidence"] = [
+        {"date": date, "page": 1, "quote": field} for date in dates
+    ]
+    entry["evidence"] = [{"page": 1, "quote": text}]
+    result = validate_document(
+        data, [{"page": 1, "text": text}], CASE, MEDICAL_POLICY, DOC
+    )
+    assert len(result["entries"]) == 1 and not result["reviews"]
+    assert result["entries"][0]["service_dates"] == dates
+    assert all(date in result["entries"][0]["text"] for date in dates)
+
+
+@pytest.mark.parametrize(
+    "field,date",
+    [
+        ("Dates of service: 03/02/2026 through 03/09/2026", "03/04/2026"),
+        ("Dates of service: 03/02/2026, 03/09/2026", "03/04/2026"),
+        ("Dates of service: 03/02/2026, 02/30/2026", "03/02/2026"),
+        ("Billing period: 03/02/2026, 03/04/2026", "03/04/2026"),
+        ("History: 03/02/2026, 03/04/2026", "03/04/2026"),
+    ],
+)
+def test_attendance_list_does_not_create_dates_from_ranges_or_other_fields(field, date):
+    from src.medical_evidence import supports_encounter_date
+
+    assert not supports_encounter_date(field, date, field)
+
+
+@pytest.mark.parametrize("quoted_role", ["dos", "appointment", "progress"])
+def test_emr_date_header_needs_independent_same_page_corroboration(quoted_role):
+    from src.medical_evidence import supports_encounter_date
+
+    fields = {
+        "dos": "EXAMPLE, ALEX DOB: 04/14/1980 Acc No. TEST DOS:\nSpine & Orthopedic\nSpecialists\n03/20/2026",
+        "appointment": "Appointment Facility: Example Clinic\n03/20/2026",
+        "progress": "Progress Note: AVERY EXAMPLE, MD 03/20/2026",
+    }
+    page = "\n".join(fields.values()) + "\nGenerated for Printing on: 03/23/2026"
+    quote = fields[quoted_role]
+    assert supports_encounter_date(quote, "03/20/2026", page)
+    assert not supports_encounter_date(quote, "04/14/1980", page)
+    assert not supports_encounter_date(quote, "03/23/2026", page)
+    assert not supports_encounter_date(
+        quote, "03/20/2026", page.replace("DOS:", "History:")
+    )
+    assert not supports_encounter_date(
+        quote, "03/20/2026", page.replace("MD 03/20/2026", "MD 03/21/2026")
+    )
+    assert not supports_encounter_date(
+        fields["progress"], "03/20/2026", fields["progress"]
+    )
+
+
+@pytest.mark.parametrize(
+    "source,quote",
+    [
+        (
+            "Levels L2-L3, L3-L4, L4-L5, and L5-S1.",
+            "Levels L2-L3, L3-L4, L4-L5 and L5-S1.",
+        ),
+        ("Pain and weakness.", "Pain, and weakness."),
+        ("Self-\nperformed testing negative.", "Self-performed testing negative."),
+        ("NECK: limited range\nof motion.", "Neck: limited range of motion."),
+    ],
+)
+def test_citations_preserve_actual_source_span_after_presentation_matching(
+    source, quote
+):
+    from src.medical_evidence import exact_evidence
+
+    result = exact_evidence(
+        [{"page": 2, "quote": quote}], {2: "Header\n" + source + "\nFooter"}
+    )
+    assert result == [{"page": 2, "quote": source}]
+
+
+@pytest.mark.parametrize(
+    "source,quote",
+    [
+        ("Dose 1,000 mg.", "Dose 1000 mg."),
+        ("Dose 1.0 mg.", "Dose 10 mg."),
+        ("No weakness.", "Weakness present."),
+        ("Left only.", "Bilateral."),
+        ("Level L4-L5.", "Level L4 L5."),
+        ("Pain. Unrelated statement. Weakness.", "Pain. Weakness."),
+        ("Testing negative.", "Testing positive."),
+    ],
+)
+def test_citation_presentation_matching_does_not_change_clinical_content(source, quote):
+    from src.medical_evidence import exact_evidence
+
+    with pytest.raises(EvidenceReview):
+        exact_evidence([{"page": 1, "quote": quote}], {1: source, 2: quote})
