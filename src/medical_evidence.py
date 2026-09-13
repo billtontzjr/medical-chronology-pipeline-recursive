@@ -211,7 +211,7 @@ def explicit_patient_names(text):
         r"(?im)^[ \t]*Patient(?: name)?[ \t]*:[ \t]*([^\r\n]*)", text
     ):
         value = re.split(
-            r"\s*(?:\||\b(?:DOB|Date of birth|MRN|Age(?:\s*/\s*Gender)?|Sex|Policy|Service Date|Address|Phone|Patient ID|Record\s+(?:Id|Number))\s*[:#])\s*",
+            r"\s*(?:\||\b(?:DOB|Date of birth|MRN|Age(?:\s*/\s*Gender)?|Sex|Policy|Service Date|Address|Phone|Patient ID|Record\s+(?:Id|Number)|Authorization(?:\s+Number)?)\s*[:#])\s*",
             match[1],
             maxsplit=1,
             flags=re.I,

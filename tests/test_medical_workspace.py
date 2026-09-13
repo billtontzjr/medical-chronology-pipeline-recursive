@@ -1412,7 +1412,7 @@ def test_patient_columns_do_not_invent_an_identity_mismatch():
     assert any(i["kind"] == "patient_identity" for i in result["reviews"])
 
 
-@pytest.mark.parametrize("column", ["Record Id : TEST123", "Record Number: TEST123", "Age / Gender : 46 / M"])
+@pytest.mark.parametrize("column", ["Record Id : TEST123", "Record Number: TEST123", "Age / Gender : 46 / M", "Authorization#: TEST123", "Authorization Number: TEST123"])
 def test_patient_name_stops_at_labeled_adjacent_record_column(column):
     from src.medical_evidence import explicit_patient_names
 
