@@ -195,7 +195,7 @@ function chronology() {
 }
 function review() {
   const c = state.detail;
-  return `<div class="sectionbar"><div><h2>Review questions</h2><p class="muted small">Check the original, choose the next action, and keep a clear decision history.</p></div></div><div class="workspace"><div>${c.issues.map((i) => `<article class="issue"><div class="entryhead">${statusBadge(i.status)}<span class="small muted">${esc(i.kind.replaceAll("_", " "))}</span></div><h3>${esc(i.title || i.kind)}</h3><p>${esc(i.reason)}</p>${i.proposed_entry?.text ? `<details><summary>Withheld proposed entry</summary><p>${esc(i.proposed_entry.text)}</p></details>` : ""}${i.proposed_entries ? `<details><summary>Entries awaiting consolidation</summary>${i.proposed_entries.map((e) => `<p>${esc(e.text)}</p>`).join("")}</details>` : ""}<p class="small">${esc(c.documents.find((d) => d.id === i.document_id)?.path || "Case review")}${i.page ? " · PDF page " + i.page : ""}</p><div class="actions">${!i.document_id ? '<button data-action="export">Retry companion reports</button>' : ""}<button data-action="issue-source" data-id="${esc(i.id)}" ${i.document_id ? "" : "disabled"}>Check original</button>${i.compare_document_id ? `<button data-action="issue-compare" data-id="${esc(i.id)}">Compare both</button>` : ""}<button class="primary" data-action="review" data-id="${esc(i.id)}" ${i.document_id ? "" : "disabled"}>${i.status === "resolved" ? "Review decision" : "Record decision"}</button></div></article>`).join("") || '<div class="empty"><h2>No open review questions</h2><p>Generated content still requires your team’s source review before final use.</p></div>'}<details><summary>Decision history (${c.history.length})</summary>${c.history.map((h) => `<div class="entry"><strong>${esc(h.reviewer)} · ${esc(h.action)}</strong><p>${esc(h.reason)}</p><small>${new Date(h.created * 1000).toLocaleString()}</small></div>`).join("")}</details></div>${sourcePanel()}</div>`;
+  return `<div class="sectionbar"><div><h2>Review questions</h2><p class="muted small">Several questions may refer to one document. Check its original and choose what happens next; the document decision covers its related questions.</p></div></div><div class="workspace"><div>${c.issues.map((i) => `<article class="issue"><div class="entryhead">${statusBadge(i.status)}<span class="small muted">${esc(i.kind.replaceAll("_", " "))}</span></div><h3>${esc(i.title || i.kind)}</h3><p>${esc(i.reason)}</p>${i.proposed_entry?.text ? `<details><summary>Withheld proposed entry</summary><p>${esc(i.proposed_entry.text)}</p></details>` : ""}${i.proposed_entries ? `<details><summary>Entries awaiting consolidation</summary>${i.proposed_entries.map((e) => `<p>${esc(e.text)}</p>`).join("")}</details>` : ""}<p class="small">${esc(c.documents.find((d) => d.id === i.document_id)?.path || "Case review")}${i.page ? " · PDF page " + i.page : ""}</p><div class="actions">${!i.document_id ? '<button data-action="export">Retry companion reports</button>' : ""}<button data-action="issue-source" data-id="${esc(i.id)}" ${i.document_id ? "" : "disabled"}>Check original</button>${i.compare_document_id ? `<button data-action="issue-compare" data-id="${esc(i.id)}">Compare both</button>` : ""}<button class="primary" data-action="review" data-id="${esc(i.id)}" ${i.document_id ? "" : "disabled"}>${i.status === "resolved" ? "Review decision" : "Record decision"}</button></div></article>`).join("") || '<div class="empty"><h2>No open review questions</h2><p>Generated content still requires your team’s source review before final use.</p></div>'}<details><summary>Decision history (${c.history.length})</summary>${c.history.map((h) => `<div class="entry"><strong>${esc(h.reviewer)} · ${esc(h.action)}</strong><p>${esc(h.reason)}</p><small>${new Date(h.created * 1000).toLocaleString()}</small></div>`).join("")}</details></div>${sourcePanel()}</div>`;
 }
 function exportsView() {
   const c = state.detail;
@@ -274,10 +274,26 @@ async function showDecision(target, action) {
   render();
   const f = $("#decision-form");
   f.reset();
+  $("#advanced-review-tools").open = false;
   f.elements.target.value = target.id;
   if (target.page) f.elements.page.value = target.page;
   f.elements.fingerprint.value = target.fingerprint || target.sha256 || "";
-  if (action) f.elements.action.value = action;
+  if (action) {
+    if (["rerun_include", "exclude"].includes(action))
+      f.elements.action.value = action;
+    else {
+      f.elements.advanced_action.value = action;
+      $("#advanced-review-tools").open = true;
+    }
+  }
+  updateDecisionAction();
+  const document = state.detail.documents.find(
+    (d) => d.id === (target.document_id || target.id),
+  );
+  $("#decision-scope").textContent =
+    "Applies to the entire document: " +
+    (document?.path || "selected source") +
+    ". Original files and decision history are preserved.";
   $("#decision-context").textContent =
     target.reason || target.title || target.path || "Source review";
   f.querySelector(".form-error").textContent = "";
@@ -452,6 +468,18 @@ $("#new-form").addEventListener("submit", async (e) => {
     f.querySelector(".form-error").textContent = err.message;
   }
 });
+function updateDecisionAction() {
+  const f = $("#decision-form");
+  f.elements.action.required = !f.elements.advanced_action.value;
+  f.elements.reason.required = !!f.elements.advanced_action.value;
+}
+$("#decision-form").addEventListener("change", (e) => {
+  const f = e.currentTarget;
+  if (e.target.name === "action") f.elements.advanced_action.value = "";
+  if (e.target.name === "advanced_action" && e.target.value)
+    f.elements.action.value = "";
+  updateDecisionAction();
+});
 $("#decision-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = e.target,
@@ -459,11 +487,14 @@ $("#decision-form").addEventListener("submit", async (e) => {
   try {
     await api("/cases/" + encodeURIComponent(state.detail.id) + "/review", {
       ...v,
+      action: v.advanced_action || v.action,
       page: v.page ? Number(v.page) : null,
     });
     $("#decision-dialog").close();
     await openCase(state.detail.id);
-    toast("Decision saved with the source version.");
+    toast(
+      "Decision saved. Use Run / Resume after your review to update outputs.",
+    );
   } catch (err) {
     f.querySelector(".form-error").textContent = err.message;
   }

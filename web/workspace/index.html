@@ -65,8 +65,25 @@
               </option>
             </select></label
           ><label
-            >Generation model<input name="model" value="claude-opus-5"
-          /></label>
+            >Chronology model<select name="model">
+              <option value="claude-opus-5">
+                Anthropic Claude Opus 5 — Recommended starting point
+              </option>
+              <option value="claude-fable-5-1">
+                Anthropic Claude Fable 5.1 — Advanced reasoning
+              </option>
+              <option value="gpt-6-astra">
+                OpenAI GPT-6 Astra — Advanced reasoning
+              </option>
+            </select></label
+          >
+          <p class="hint">
+            Opus 5 is our tested starting point for drafting and checking
+            chronologies. Fable 5.1 and Astra are higher-cost alternatives;
+            neither has yet been shown more accurate on our case tests. The
+            selected model is saved with the case and used for drafting and
+            checks. OCR reads the pages separately.
+          </p>
         </details>
         <div class="form-error" role="alert"></div>
         <div class="dialog-actions">
@@ -88,13 +105,12 @@
           type="hidden"
           name="fingerprint"
         /><label
-          >Action<select name="action">
-            <option value="retry">Retry extraction for this document</option>
-            <option value="resolve">Resolve after checking the original</option>
-            <option value="keep_distinct">Keep as a distinct record</option>
-            <option value="defer">Defer and keep flagged</option>
-            <option value="reconsider">Reconsider exclusion</option>
-            <option value="restore">Undo prior decision and reopen</option>
+          >What should happen next?<select name="action" required>
+            <option value="">Choose an action</option>
+            <option value="rerun_include">
+              Rerun it and include it in the chronology
+            </option>
+            <option value="exclude">Exclude it</option>
           </select></label
         ><label
           >Your name<input
@@ -102,13 +118,37 @@
             required
             autocomplete="name" /></label
         ><label
-          >Decision and source reference<textarea
+          >Notes and source reference (optional)<textarea
             name="reason"
-            required
             rows="4"
-            placeholder="What you checked, the source page, and what should happen next"
+            placeholder="Why you chose this action and any page you checked"
           ></textarea>
         </label>
+        <p class="hint" id="decision-scope"></p>
+        <p class="hint">
+          Save your decisions, then use Run / Resume to update the chronology
+          and downloads. Rerun checks the source again; unresolved facts stay
+          flagged. Previous downloads remain unchanged.
+        </p>
+        <details id="advanced-review-tools">
+          <summary>More review tools</summary>
+          <p class="hint">
+            These advanced actions require a source-review note.
+          </p>
+          <label
+            >Advanced action<select name="advanced_action">
+              <option value="">Use the choice above</option>
+              <option value="retry">Retry OCR extraction</option>
+              <option value="resolve">
+                Resolve with a source-backed correction
+              </option>
+              <option value="keep_distinct">Keep as a distinct record</option>
+              <option value="defer">Defer and keep flagged</option>
+              <option value="reconsider">Reconsider exclusion</option>
+              <option value="restore">Undo prior decision and reopen</option>
+            </select></label
+          >
+        </details>
         <details>
           <summary>Source-backed correction</summary>
           <label

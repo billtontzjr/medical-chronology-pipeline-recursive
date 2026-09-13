@@ -88,6 +88,8 @@ def review_source(store, case_id, data):
             "reconsider",
             "restore",
             "keep_distinct",
+            "exclude",
+            "rerun_include",
         ):
             raise ValueError("Choose a supported review action.")
         if action == "keep_distinct" and (not issue or issue["kind"] != "duplicate"):
@@ -104,6 +106,8 @@ def review_source(store, case_id, data):
             raise ValueError("Choose a valid physical PDF page.")
         if correction and page is None:
             raise ValueError("A source correction needs its physical PDF page.")
+        if action == "exclude" and correction:
+            raise ValueError("Choose rerun to apply a source correction.")
         if (
             action == "resolve"
             and issue
@@ -127,7 +131,11 @@ def review_source(store, case_id, data):
             target,
             action,
             data.get("reviewer", ""),
-            data.get("reason", ""),
+            data.get("reason", "").strip()
+            or {
+                "exclude": "Exclude this document from the chronology.",
+                "rerun_include": "Rerun this document for inclusion after source checks.",
+            }.get(action, ""),
             expected,
             {
                 "page": page,
@@ -146,11 +154,24 @@ def review_source(store, case_id, data):
             overrides = {"source_sha256": doc["sha256"], "corrections": {}}
         elif action == "defer":
             overrides["deferred"] = True
+        elif action == "exclude":
+            overrides.pop("deferred", None)
+            overrides["excluded"] = {
+                "review": event["id"],
+                "reviewer": event["reviewer"],
+                "reason": event["reason"],
+            }
         else:
             overrides.pop("deferred", None)
+            if action in ("rerun_include", "reconsider"):
+                overrides.pop("excluded", None)
+                overrides.pop("duplicate_confirmed", None)
+                overrides["reconsideration"] = {"reason": event["reason"], "page": page}
             if correction:
                 overrides["corrections"][str(page)] = correction
-            if action == "retry":
+            if action == "retry" or (
+                action == "rerun_include" and issue and issue["kind"] == "ocr"
+            ):
                 overrides["retry_ocr"] = event["id"]
             if action == "resolve" and issue and issue["kind"] == "patient_identity":
                 overrides["identity_confirmed"] = {
@@ -207,6 +228,23 @@ def review_source(store, case_id, data):
         remaining_issues = [
             i for i in store.all(case_id, "issues") if i.get("document_id") == doc["id"]
         ]
+        if action == "exclude":
+            doc.update(
+                status="excluded",
+                reason=event["reason"],
+                exclusions=[
+                    {
+                        "category": "reviewer_excluded",
+                        "pages": list(range(1, doc.get("page_count", 0) + 1)),
+                        "reason": event["reason"],
+                        "reviewer": event["reviewer"],
+                        "decision_id": event["id"],
+                    }
+                ],
+            )
+            remaining_issues = []
+        elif action == "rerun_include":
+            doc.pop("exclusions", None)
         store.replace_document_result(case_id, doc, [], remaining_issues)
         state = store.sessions.load(case_id)
         state.status = "pending"
@@ -431,6 +469,36 @@ class MedicalRun:
 
     def generate_document(self, doc):
         override = self.store.get(self.case_id, "overrides", doc["id"]) or {}
+        if override.get("excluded"):
+            original = self.store.file(self.case_id, "input", doc["path"])
+            if (
+                override.get("source_sha256") != doc["sha256"]
+                or hashlib.sha256(original.read_bytes()).hexdigest() != doc["sha256"]
+            ):
+                raise ValueError(
+                    "The exclusion belongs to a different source version. Review the changed original."
+                )
+            choice = override["excluded"]
+            self.store.replace_document_result(
+                self.case_id,
+                {
+                    **doc,
+                    "status": "excluded",
+                    "reason": choice["reason"],
+                    "exclusions": [
+                        {
+                            "category": "reviewer_excluded",
+                            "pages": list(range(1, doc.get("page_count", 0) + 1)),
+                            "reason": choice["reason"],
+                            "reviewer": choice["reviewer"],
+                            "decision_id": choice["review"],
+                        }
+                    ],
+                },
+                [],
+                [],
+            )
+            return
         if override.get("deferred"):
             issue = issue_for(
                 doc,
@@ -938,7 +1006,9 @@ class MedicalRun:
             self.phase("generate", "in_progress")
             for number, doc in enumerate(docs, 1):
                 self.checkpoint(f"Record {number} of {len(docs)} · " + doc["path"])
-                if doc.get("duplicate_kind") == "exact":
+                if doc.get("duplicate_kind") == "exact" and not (
+                    self.store.get(self.case_id, "overrides", doc["id"]) or {}
+                ).get("excluded"):
                     continue
                 self.generate_document(doc)
             self.phase("ocr", "complete")
