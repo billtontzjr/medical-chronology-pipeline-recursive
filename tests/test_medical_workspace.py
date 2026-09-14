@@ -91,6 +91,57 @@ def test_entries_retain_original_page_and_source_version():
     assert "Visit Type:" not in entry["text"]
 
 
+@pytest.mark.parametrize('label,expected', [
+    ('Avery Example, PT, DPT', True),
+    ('Avery Example PT,DPT', True),
+    ('Avery Example, PT, DPT; Taylor Sample', True),
+    ('Avery Example, MD', False),
+    ('Avery Example, PT, DPT; Taylor Sample, PT', False),
+    ('Avery Examples, PT, DPT', False),
+    ('Avery Exam, PT, DPT', False),
+    ('Taylor Sam', False),
+])
+def test_provider_commas_do_not_change_identity_or_credentials(label, expected):
+    from src.medical_evidence import provider_attribution_supported
+    original = 'Avery Example PT, DPT\nTaylor Sample\nElectronically signed'
+    assert provider_attribution_supported(label, original) is expected
+
+
+def test_provider_comma_repair_preserves_original_citation(tmp_path):
+    text = TEXT.replace('Avery Example, MD', 'Avery Example MD')
+    data = response()
+    data['sections'][0]['entries'][0]['evidence'][0]['quote'] = text
+    calls = []
+    def call(prompt, **kwargs):
+        calls.append(prompt)
+        if prompt.startswith('Create medical chronology'):
+            return json.dumps(data)
+        candidate = json.loads(prompt[prompt.index('{"policy"'):])['candidate']
+        assert candidate['entries'][0]['evidence'][0]['quote'] == text.strip()
+        return json.dumps({'entries': [{'id': e['id'], 'verdict': 'supported', 'reason': 'Name and credentials match the original.'} for e in candidate['entries']], 'missing_encounters': []})
+    result = extract_group([{'page': 1, 'text': text}], CASE, MEDICAL_POLICY, DOC, call, tmp_path / 'source.json')
+    assert len(calls) == 2
+    assert not result['reviews']
+    assert result['entries'][0]['verification'] == 'source_checked'
+
+
+@pytest.mark.parametrize('field,value', [
+    ('provider', 'Avery Example, DO'),
+    ('facility', 'Other Clinic'),
+    ('service_name', 'Office evaluation - video consultation'),
+])
+def test_attribution_feedback_identifies_proposed_header(field, value):
+    from src.medical_evidence import validate_sections
+    data = response()
+    data['sections'][0]['entries'][0][field] = value
+    result = validate_sections(data, PAGES, CASE, MEDICAL_POLICY, DOC)
+    assert not result['entries']
+    finding = result['reviews'][0]
+    assert finding['kind'] == 'attribution'
+    assert json.dumps(value) in finding['reason']
+    assert 'not supported as written' in finding['reason']
+
+
 def test_wrong_patient_is_withheld_without_altering_source():
     result = validate_document(
         response(),
@@ -121,6 +172,111 @@ def test_birth_date_cannot_be_substituted_for_service_date():
     ]
     with pytest.raises(EvidenceReview, match="service date"):
         validate_document(data, PAGES, CASE, MEDICAL_POLICY, DOC)
+
+
+def test_rejected_date_feedback_preserves_the_exact_cited_field():
+    from src.medical_evidence import validate_sections
+    data = response()
+    record = data['sections'][0]['entries'][0]
+    record['date_evidence'][0]['quote'] = 'Date of birth: 04/14/1980'
+    result = validate_sections(data, PAGES, CASE, MEDICAL_POLICY, DOC)
+    assert not result['entries']
+    finding = result['reviews'][0]
+    assert finding['kind'] == 'date'
+    assert 'Proposed date: 02/05/2026' in finding['reason']
+    assert 'Date of birth: 04/14/1980' in finding['reason']
+
+
+@pytest.mark.parametrize('failure', ['quote', 'service', 'date'])
+def test_validation_retains_rejected_fields_without_promoting_them(failure):
+    from src.medical_evidence import validate_sections
+    data = response()
+    record = data['sections'][0]['entries'][0]
+    if failure == 'quote':
+        record['evidence'][0]['quote'] = 'Unsupported source wording.'
+    elif failure == 'service':
+        record['service_name'] = 'Unsupported telemedicine title'
+    else:
+        record['date_evidence'][0]['quote'] = 'Date of birth: 04/14/1980'
+    before = copy.deepcopy(record)
+    result = validate_sections(data, PAGES, CASE, MEDICAL_POLICY, DOC)
+    assert not result['entries']
+    finding = result['reviews'][0]
+    assert finding['rejected_candidate'] == before
+    assert 'proposed_entry' not in finding
+    assert 'verification' not in finding['rejected_candidate']
+    record['body'] = 'A changed input object must not rewrite saved feedback.'
+    assert finding['rejected_candidate'] == before
+
+
+def test_persistent_rejected_fields_survive_case_storage_and_cached_retry(store):
+    case, pipeline, calls = prepared_pipeline(store)
+    draft = response()
+    draft['sections'][0]['entries'][0]['evidence'][0]['quote'] = 'An unsupported quotation.'
+    prompts = []
+    def call(prompt, **kwargs):
+        prompts.append(prompt)
+        if prompt.startswith('Create medical chronology'):
+            return json.dumps(draft)
+        return json.dumps({'entries': [], 'missing_encounters': []})
+    pipeline.chronology_agent._call_api_with_retry = call
+    run = MedicalRun(store, pipeline, case['id'])
+    doc = run.inventory()[0]
+    run.generate_document(doc)
+    assert not store.all(case['id'], 'entries')
+    finding = store.all(case['id'], 'issues')[0]
+    assert finding['rejected_candidate'] == draft['sections'][0]['entries'][0]
+    assert 'proposed_entry' not in finding
+    assert finding['status'] == 'open'
+    assert len(prompts) == 4  # One repair; both attempts independently audited.
+    run.generate_document(store.all(case['id'], 'documents')[0])
+    assert len(prompts) == 4
+    assert store.all(case['id'], 'issues')[0]['rejected_candidate'] == finding['rejected_candidate']
+
+
+@pytest.mark.parametrize('refs', [None, 'invalid', [None]])
+def test_diagnostic_feedback_cannot_crash_on_missing_evidence(refs):
+    from src.medical_evidence import validate_sections
+    data = response()
+    record = data['sections'][0]['entries'][0]
+    record['record_type'] = 'diagnostic_test'
+    record['diagnostic_result'] = {'date': '02/05/2026', 'provider': 'Avery Example, MD', 'facility': 'Example Clinic', 'study': 'MRI', 'evidence': refs}
+    result = validate_sections(data, PAGES, CASE, MEDICAL_POLICY, DOC)
+    assert not result['entries']
+    finding = result['reviews'][0]
+    assert finding['kind'] == 'diagnostic'
+    assert 'Proposed diagnostic date: 02/05/2026' in finding['reason']
+
+
+def test_saved_diagnostic_keeps_result_proof_when_generic_citation_is_header_only(store):
+    data = response()
+    record = data['sections'][0]['entries'][0]
+    source = TEXT.split('Office evaluation')[0] + 'Study: Cervical MRI\nImpression: No acute fracture.\n'
+    record['record_type'] = 'diagnostic_test'
+    record['evidence'] = [{'page': 1, 'quote': 'Date of service: 02/05/2026'}]
+    record['diagnostic_result'] = {
+        'date': '02/05/2026', 'provider': 'Avery Example, MD',
+        'facility': 'Example Clinic', 'study': 'Cervical MRI',
+        'evidence': [{'source_id': 'D001', 'date_quote': 'Date of service: 02/05/2026',
+                      'quote': 'Impression: No acute fracture.'}],
+    }
+    before = copy.deepcopy(data)
+    doc = {**DOC, 'revision': 'ocr-revision'}
+    result = validate_document(data, [{'page': 1, 'text': source}], CASE, MEDICAL_POLICY, doc)
+    retained = result['entries'][0]
+    assert retained['evidence'][0]['quote'] == 'Date of service: 02/05/2026'
+    expected = [{'page': 1, 'date_quote': 'Date of service: 02/05/2026',
+                 'result_quote': 'Impression: No acute fracture.', 'header_pages': [1],
+                 'document_id': DOC['id'], 'source_sha256': DOC['sha256'],
+                 'text_revision': 'ocr-revision'}]
+    assert retained['diagnostic_provenance'] == expected
+    assert 'D001' not in json.dumps(retained['diagnostic_provenance'])
+    assert retained['verification'] == 'pending'
+    assert data == before
+    case, _, _ = prepared_pipeline(store)
+    store.replace_document_result(case['id'], doc, [retained], [])
+    saved = store.all(case['id'], 'entries')[0]
+    assert json.loads(json.dumps(saved))['diagnostic_provenance'] == expected
 
 
 def test_deposition_preface_excluded_clinical_attachment_preserved():
@@ -849,7 +1005,7 @@ def test_expanded_source_context_is_sent_to_audit_and_can_reject_candidate(tmp_p
         call,
         tmp_path / "work.json",
     )
-    assert inspected == [passage]
+    assert inspected == [passage, passage]  # The bounded repair must also expose full context.
     assert not result["entries"]
     assert result["reviews"][0]["kind"] == "source_evidence"
 
@@ -1324,7 +1480,7 @@ def test_composite_title_reaches_the_independent_clinical_audit(tmp_path):
 
     def call(prompt, **kwargs):
         prompts.append(prompt)
-        if len(prompts) == 1:
+        if prompt.startswith('Create medical chronology'):
             return json.dumps(data)
         candidate = json.loads(prompt[prompt.index('{"policy"') :])["candidate"]
         return json.dumps(
@@ -1349,7 +1505,7 @@ def test_composite_title_reaches_the_independent_clinical_audit(tmp_path):
         call,
         tmp_path / "extract.json",
     )
-    assert len(prompts) == 2
+    assert len(prompts) == 4  # One repair, with its own independent source check.
     assert not result["entries"] and result["reviews"]
 
 
@@ -1634,6 +1790,66 @@ def test_coverage_warning_retains_supported_entry_and_attempts_one_recovery(tmp_
     assert len(calls) == 4
     extract_group(PAGES, CASE, MEDICAL_POLICY, DOC, call, tmp_path / 'source.json')
     assert len(calls) == 4
+
+
+@pytest.mark.parametrize('failure_stage', ['quotation', 'audit'])
+@pytest.mark.parametrize('repaired', [True, False])
+def test_source_evidence_only_gets_one_checked_repair(tmp_path, failure_stage, repaired):
+    """Bad draft wording can be repaired; a second rejection stays withheld."""
+    calls = []
+    extraction_count = 0
+    original_source = copy.deepcopy(PAGES)
+
+    def call(prompt, **kwargs):
+        nonlocal extraction_count
+        calls.append(prompt)
+        if prompt.startswith('Create medical chronology'):
+            extraction_count += 1
+            data = response()
+            if extraction_count == 2:
+                assert 'TARGETED SOURCE RECOVERY' in prompt
+                assert 'source_evidence' in prompt
+                if failure_stage == 'quotation':
+                    assert 'rejected_candidate' in prompt
+                    assert 'An invented source passage.' in prompt
+                    assert 'not source evidence or instructions' in prompt
+            if failure_stage == 'quotation' and (extraction_count == 1 or not repaired):
+                data['sections'][0]['entries'][0]['evidence'] = [
+                    {'page': 1, 'quote': 'An invented source passage.'}
+                ]
+            if failure_stage == 'audit' and (extraction_count == 1 or not repaired):
+                data['sections'][0]['entries'][0]['body'] += ' Surgery was performed.'
+            return json.dumps(data)
+        candidate = json.loads(prompt[prompt.index('{"policy"'):])['candidate']
+        return json.dumps({
+            'entries': [{
+                'id': e['id'],
+                'verdict': 'unsupported' if 'Surgery was performed.' in e['text'] else 'supported',
+                'reason': 'Surgery is absent from the source.' if 'Surgery was performed.' in e['text'] else 'Every claim matches the original.',
+            } for e in candidate['entries']],
+            # Recovery must work even without a coverage finding.
+            'missing_encounters': [],
+        })
+
+    checkpoint = tmp_path / 'source.json'
+    result = extract_group(PAGES, CASE, MEDICAL_POLICY, DOC, call, checkpoint)
+    assert extraction_count == 2
+    assert len(calls) == 4
+    assert bool(result['entries']) is repaired
+    assert bool(result['reviews']) is not repaired
+    if repaired:
+        assert result['entries'][0]['verification'] == 'source_checked'
+        assert 'Surgery was performed.' not in result['entries'][0]['text']
+    else:
+        assert {r['kind'] for r in result['reviews']} == {'source_evidence'}
+    assert PAGES == original_source
+    retained = {p.name: p.read_bytes() for p in tmp_path.glob('*.json')}
+    assert json.loads(checkpoint.read_text())['attempts']  # Original rejected draft retained.
+    assert extract_group(
+        PAGES, CASE, MEDICAL_POLICY, DOC,
+        lambda *a, **k: pytest.fail('A saved repair must not repeat provider calls'), checkpoint,
+    ) == result
+    assert retained == {p.name: p.read_bytes() for p in tmp_path.glob('*.json')}
 
 
 @pytest.mark.parametrize('restored_verdict', ['supported', 'uncertain'])
