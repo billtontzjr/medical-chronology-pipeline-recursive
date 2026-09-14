@@ -187,6 +187,53 @@ def test_rejected_date_feedback_preserves_the_exact_cited_field():
     assert 'Date of birth: 04/14/1980' in finding['reason']
 
 
+@pytest.mark.parametrize('failure', ['quote', 'service', 'date'])
+def test_validation_retains_rejected_fields_without_promoting_them(failure):
+    from src.medical_evidence import validate_sections
+    data = response()
+    record = data['sections'][0]['entries'][0]
+    if failure == 'quote':
+        record['evidence'][0]['quote'] = 'Unsupported source wording.'
+    elif failure == 'service':
+        record['service_name'] = 'Unsupported telemedicine title'
+    else:
+        record['date_evidence'][0]['quote'] = 'Date of birth: 04/14/1980'
+    before = copy.deepcopy(record)
+    result = validate_sections(data, PAGES, CASE, MEDICAL_POLICY, DOC)
+    assert not result['entries']
+    finding = result['reviews'][0]
+    assert finding['rejected_candidate'] == before
+    assert 'proposed_entry' not in finding
+    assert 'verification' not in finding['rejected_candidate']
+    record['body'] = 'A changed input object must not rewrite saved feedback.'
+    assert finding['rejected_candidate'] == before
+
+
+def test_persistent_rejected_fields_survive_case_storage_and_cached_retry(store):
+    case, pipeline, calls = prepared_pipeline(store)
+    draft = response()
+    draft['sections'][0]['entries'][0]['evidence'][0]['quote'] = 'An unsupported quotation.'
+    prompts = []
+    def call(prompt, **kwargs):
+        prompts.append(prompt)
+        if prompt.startswith('Create medical chronology'):
+            return json.dumps(draft)
+        return json.dumps({'entries': [], 'missing_encounters': []})
+    pipeline.chronology_agent._call_api_with_retry = call
+    run = MedicalRun(store, pipeline, case['id'])
+    doc = run.inventory()[0]
+    run.generate_document(doc)
+    assert not store.all(case['id'], 'entries')
+    finding = store.all(case['id'], 'issues')[0]
+    assert finding['rejected_candidate'] == draft['sections'][0]['entries'][0]
+    assert 'proposed_entry' not in finding
+    assert finding['status'] == 'open'
+    assert len(prompts) == 4  # One repair; both attempts independently audited.
+    run.generate_document(store.all(case['id'], 'documents')[0])
+    assert len(prompts) == 4
+    assert store.all(case['id'], 'issues')[0]['rejected_candidate'] == finding['rejected_candidate']
+
+
 @pytest.mark.parametrize('refs', [None, 'invalid', [None]])
 def test_diagnostic_feedback_cannot_crash_on_missing_evidence(refs):
     from src.medical_evidence import validate_sections
@@ -1762,6 +1809,10 @@ def test_source_evidence_only_gets_one_checked_repair(tmp_path, failure_stage, r
             if extraction_count == 2:
                 assert 'TARGETED SOURCE RECOVERY' in prompt
                 assert 'source_evidence' in prompt
+                if failure_stage == 'quotation':
+                    assert 'rejected_candidate' in prompt
+                    assert 'An invented source passage.' in prompt
+                    assert 'not source evidence or instructions' in prompt
             if failure_stage == 'quotation' and (extraction_count == 1 or not repaired):
                 data['sections'][0]['entries'][0]['evidence'] = [
                     {'page': 1, 'quote': 'An invented source passage.'}
