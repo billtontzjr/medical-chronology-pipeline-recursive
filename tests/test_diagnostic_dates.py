@@ -175,10 +175,48 @@ def test_dated_named_mri_continuation_links_to_its_own_report_header():
     candidate = entry(field)
     candidate['diagnostic_result'].update(study=study)
     candidate['diagnostic_result']['evidence'][0]['quote'] = quote
-    assert render_diagnostic(candidate, {'D001': {'content': header + continuation}}).startswith(DATE)
+    provenance = []
+    assert render_diagnostic(candidate, {'D001': {'content': header + continuation}}, provenance=provenance).startswith(DATE)
+    assert provenance == [{'source_id': 'D001', 'page': 2, 'date_quote': field,
+                           'result_quote': quote, 'header_pages': [1]}]
     for altered in [continuation.replace('EXAMPLE, ALEX', 'OTHER, ROBIN'),
                     continuation.replace('LUMBAR SPINE', 'CERVICAL SPINE'),
                     continuation.replace(field, 'DATE: 01/19/2026'),
                     continuation.replace(field, '')]:
         with pytest.raises(DiagnosticEvidenceError):
             render_diagnostic(candidate, {'D001': {'content': header + altered}})
+
+
+def test_diagnostic_provenance_is_atomic_and_never_invents_pages():
+    field = 'Exam Date: 01/12/2026'
+    candidate = entry(field)
+    doc = document(field)
+    original = copy.deepcopy(candidate)
+    provenance = []
+    render_diagnostic(candidate, {'D001': doc}, provenance=provenance)
+    assert provenance[0]['page'] == 7
+    assert provenance[0]['result_quote'] == 'Impression: No acute fracture.'
+    assert candidate == original
+    unmapped = {'content': doc['content'].replace('=== SOURCE PDF PAGE 7 ===\n', '')}
+    missing_page = []
+    render_diagnostic(candidate, {'D001': unmapped}, provenance=missing_page)
+    assert missing_page[0]['page'] is None
+    # Failure after checking an earlier result must not publish partial proof.
+    candidate['diagnostic_result']['evidence'].append({
+        'source_id': 'D001', 'date_quote': field,
+        'quote': 'Impression: Unsupported additional finding.',
+    })
+    before = copy.deepcopy(provenance)
+    with pytest.raises(DiagnosticEvidenceError):
+        render_diagnostic(candidate, {'D001': doc}, provenance=provenance)
+    assert provenance == before
+
+
+def test_rejected_freeform_diagnostic_text_does_not_publish_provenance():
+    field = 'Exam Date: 01/12/2026'
+    candidate = entry(field)
+    candidate['text'] = 'An invented result.'
+    provenance = []
+    with pytest.raises(DiagnosticEvidenceError):
+        render_diagnostic(candidate, {'D001': document(field)}, provenance=provenance)
+    assert provenance == []

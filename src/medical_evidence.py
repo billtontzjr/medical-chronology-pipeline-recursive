@@ -665,6 +665,7 @@ def validate_document(data, pages, case, policy, document, identity_context=()):
                 )
                 continue
             evidence = exact_evidence(record.get("evidence"), source)
+            diagnostic_provenance = []
             if kind == "diagnostic_test":
                 diagnostic = record.get("diagnostic_result")
                 if not isinstance(diagnostic, dict):
@@ -686,6 +687,7 @@ def validate_document(data, pages, case, policy, document, identity_context=()):
                                 "corroborating_dates": case.get("verified_service_dates", []),
                             }
                         },
+                        provenance=diagnostic_provenance,
                     )
                 except DiagnosticEvidenceError as exc:
                     refs = diagnostic.get("evidence")
@@ -832,6 +834,16 @@ def validate_document(data, pages, case, policy, document, identity_context=()):
                 "therapy_type": record.get("therapy_type"),
                 "verification": "pending",
             }
+            if diagnostic_provenance:
+                entry["diagnostic_provenance"] = [
+                    {
+                        **{key: value for key, value in ref.items() if key != "source_id"},
+                        "document_id": document["id"],
+                        "source_sha256": document["sha256"],
+                        "text_revision": document.get("revision"),
+                    }
+                    for ref in diagnostic_provenance
+                ]
             entries.append(entry)
     if sorted(seen) != sorted(text_by_page) or len(seen) != len(set(seen)):
         raise FormatError("Account for each supplied physical PDF page exactly once.")

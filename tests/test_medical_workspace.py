@@ -201,6 +201,37 @@ def test_diagnostic_feedback_cannot_crash_on_missing_evidence(refs):
     assert 'Proposed diagnostic date: 02/05/2026' in finding['reason']
 
 
+def test_saved_diagnostic_keeps_result_proof_when_generic_citation_is_header_only(store):
+    data = response()
+    record = data['sections'][0]['entries'][0]
+    source = TEXT.split('Office evaluation')[0] + 'Study: Cervical MRI\nImpression: No acute fracture.\n'
+    record['record_type'] = 'diagnostic_test'
+    record['evidence'] = [{'page': 1, 'quote': 'Date of service: 02/05/2026'}]
+    record['diagnostic_result'] = {
+        'date': '02/05/2026', 'provider': 'Avery Example, MD',
+        'facility': 'Example Clinic', 'study': 'Cervical MRI',
+        'evidence': [{'source_id': 'D001', 'date_quote': 'Date of service: 02/05/2026',
+                      'quote': 'Impression: No acute fracture.'}],
+    }
+    before = copy.deepcopy(data)
+    doc = {**DOC, 'revision': 'ocr-revision'}
+    result = validate_document(data, [{'page': 1, 'text': source}], CASE, MEDICAL_POLICY, doc)
+    retained = result['entries'][0]
+    assert retained['evidence'][0]['quote'] == 'Date of service: 02/05/2026'
+    expected = [{'page': 1, 'date_quote': 'Date of service: 02/05/2026',
+                 'result_quote': 'Impression: No acute fracture.', 'header_pages': [1],
+                 'document_id': DOC['id'], 'source_sha256': DOC['sha256'],
+                 'text_revision': 'ocr-revision'}]
+    assert retained['diagnostic_provenance'] == expected
+    assert 'D001' not in json.dumps(retained['diagnostic_provenance'])
+    assert retained['verification'] == 'pending'
+    assert data == before
+    case, _, _ = prepared_pipeline(store)
+    store.replace_document_result(case['id'], doc, [retained], [])
+    saved = store.all(case['id'], 'entries')[0]
+    assert json.loads(json.dumps(saved))['diagnostic_provenance'] == expected
+
+
 def test_deposition_preface_excluded_clinical_attachment_preserved():
     pages = [
         {
