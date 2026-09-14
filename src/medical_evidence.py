@@ -17,7 +17,7 @@ from .chronology_scope import _has_medical_content
 from .clinical_dates import supports_header_date
 
 PROTOCOL = "medical-page-evidence-v8"
-VALIDATION_VERSION = "medical-source-validation-v4"
+VALIDATION_VERSION = "medical-source-validation-v5"
 PAGE_LIMIT = 48000
 CLINICAL = {"clinical_care", "medical_evaluation", "diagnostic_test", "medical_billing"}
 EXCLUDED = {
@@ -424,13 +424,21 @@ def service_title_supported(value, pages):
 
 def provider_attribution_supported(value, source):
     """Allow separately quoted treating/co-signing provider fields in a header."""
-    if normalized(value) in normalized(source):
+    def present(label):
+        # Commas between a name and credentials are display punctuation.
+        # Preserve spelling, initials, credentials and their order; this is
+        # not a fuzzy name match or permission to add a role/qualification.
+        key = normalized(label.replace(",", " "))
+        original = normalized(source.replace(",", " "))
+        return bool(key) and bool(re.search(r"(?<!\w)" + re.escape(key) + r"(?!\w)", original))
+
+    if present(value):
         return True
     parts = [part.strip() for part in value.split(";")]
     return (
         2 <= len(parts) <= 3
         and all(parts)
-        and all(normalized(part) in normalized(source) for part in parts)
+        and all(present(part) for part in parts)
     )
 
 
@@ -680,7 +688,13 @@ def validate_document(data, pages, case, policy, document, identity_context=()):
                         },
                     )
                 except DiagnosticEvidenceError as exc:
-                    raise EvidenceReview(str(exc), "diagnostic", numbers) from exc
+                    refs = diagnostic.get("evidence")
+                    cited_dates = [ref.get("date_quote", "") for ref in refs if isinstance(ref, dict)] if isinstance(refs, list) else []
+                    raise EvidenceReview(
+                        str(exc) + " Proposed diagnostic date: " + str(diagnostic.get("date", ""))
+                        + "; cited date fields: " + json.dumps(cited_dates, ensure_ascii=False),
+                        "diagnostic", numbers,
+                    ) from exc
                 old_header = ". ".join([diagnostic["date"], diagnostic["facility"].rstrip("."), diagnostic["provider"].rstrip("."), diagnostic["study"].rstrip(".")]) + ". "
                 if text.startswith(old_header):
                     text = ". ".join([diagnostic["date"], diagnostic["provider"].rstrip("."), diagnostic["facility"].rstrip("."), diagnostic["study"].rstrip(".")]) + ". " + text[len(old_header):]
@@ -718,7 +732,9 @@ def validate_document(data, pages, case, policy, document, identity_context=()):
                         re.I,
                     ):
                         raise EvidenceReview(
-                            "A service date is not supported by its cited date field.",
+                            "A service date is not supported by its cited date field. "
+                            + "Proposed date: " + ref["date"] + "; cited field: "
+                            + json.dumps(ref["quote"], ensure_ascii=False),
                             "date",
                             [ref["page"]],
                         )
@@ -767,7 +783,10 @@ def validate_document(data, pages, case, policy, document, identity_context=()):
                     ):
                         raise EvidenceReview(
                             label
-                            + " attribution is not present on the cited source pages.",
+                            + " attribution needs review: the proposed header "
+                            + json.dumps(value, ensure_ascii=False)
+                            + " is not supported as written on the cited source pages. "
+                            + "Check the exact source wording and the role it describes.",
                             "attribution",
                             numbers,
                         )
@@ -989,7 +1008,9 @@ No facts are approved merely because they appear in a previous draft.
     result["entries"] = kept
     # One bounded source-grounded recovery before handing work to the team.
     # No unchecked response replaces a previously checked entry.
-    if recovery is None and any(r["kind"] in ("date", "patient_identity", "coverage", "diagnostic", "attribution") for r in result["reviews"]):
+    # A citation or draft-claim failure needs the same chance to repair even
+    # when the coverage checker has not also reported the withheld encounter.
+    if recovery is None and any(r["kind"] in ("date", "patient_identity", "coverage", "diagnostic", "attribution", "source_evidence") for r in result["reviews"]):
         recovery_key = digest(result["reviews"])[:16]
         recovered = extract_group(pages, case, policy, document, call,
                                   Path(checkpoint).with_suffix(f".recovery-{recovery_key}.json"), identity_context,
