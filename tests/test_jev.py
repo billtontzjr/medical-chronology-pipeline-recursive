@@ -63,6 +63,19 @@ def test_large_request_never_truncates_or_calls_network():
         client.evaluate({"source_pages": "x" * 30000}, questions())
 
 
+def test_oversized_entry_does_not_block_other_entries(tmp_path, monkeypatch):
+    monkeypatch.setenv("JEV_ENABLED", "true")
+    seen = []
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json=response())
+    client = JevClient(api_key="fictional", transport=httpx.MockTransport(handler))
+    entries = [{**ENTRIES[0], "id": "too-long", "text": "x" * 30000}, *ENTRIES]
+    report = run(tmp_path, client, entries=entries)
+    assert report["entries_checked"] == 1 and report["entries_unchecked"] == 1
+    assert len(seen) == 1
+
+
 DOCS = [{"id": "d1", "sha256": "hash", "revision": "r1"}]
 ENTRIES = [{"id": "e1", "document_id": "d1", "text": "MRI was recommended.", "evidence": [
     {"document_id": "d1", "page": 1, "quote": "MRI was recommended.", "source_sha256": "hash"}]}]

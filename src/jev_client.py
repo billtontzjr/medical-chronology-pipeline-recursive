@@ -17,6 +17,10 @@ class JevError(RuntimeError):
     pass
 
 
+class JevInputError(JevError):
+    """This entry cannot be sent; other entries may still be checked."""
+
+
 def enabled():
     return os.getenv("JEV_ENABLED", "false").strip().lower() == "true"
 
@@ -70,7 +74,7 @@ class JevClient:
         import json
         payload = {"model": self.model, "state": state, "questions": questions}
         if len(json.dumps(payload, ensure_ascii=False).encode()) > MAX_REQUEST_BYTES:
-            raise JevError("The complete evidence exceeds the Jev request limit; manual review is required. No text was truncated.")
+            raise JevInputError("The complete evidence exceeds the Jev request limit; manual review is required. No text was truncated.")
         # Fixed HTTPS destination, no redirects, no ambient HTTP proxies or netrc.
         with httpx.Client(transport=self._transport, timeout=httpx.Timeout(30, connect=10),
                           follow_redirects=False, trust_env=False) as client:

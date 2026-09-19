@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .case_store import digest
 from .deposition_evidence import atomic_json
-from .jev_client import JevClient, JevError, PROTOCOL, enabled, questions, validate_response
+from .jev_client import JevClient, JevError, JevInputError, PROTOCOL, enabled, questions, validate_response
 from .ocr_coverage import coverage_path
 from .source_pages import page_units
 
@@ -133,6 +133,8 @@ def audit_entries(entries, documents, load, checkpoint_dir, progress=lambda _: N
                 sent += 1
                 try:
                     response = validate_response(client.evaluate(state, schema), schema, client.model)
+                except JevInputError:
+                    raise
                 except JevError as exc:
                     # A single provider failure must not trigger hundreds of doomed calls.
                     api_failure = str(exc)
