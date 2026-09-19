@@ -226,3 +226,18 @@ def test_full_workspace_export_keeps_jev_flags_and_prior_versions(tmp_path, monk
     textpath.write_text(textpath.read_text() + "changed")
     with pytest.raises(JevError, match="extraction changed"):
         source_loader(store, case["id"])(docs[0])
+
+
+def test_benchmark_distinguishes_labels_from_review_routing():
+    from scripts.jev_benchmark import summarize
+    rows = [
+        {"expected": "supported", "observed": "supported", "correct": True,
+         "response": {"answers": {"anatomy": {"choice": "not_applicable", "confidence": .8}}}},
+        {"expected": "contradicted", "observed": "supported", "correct": False,
+         "response": {"answers": {"factual_support": {"choice": "supported", "confidence": .99}}}},
+        {"expected": "insufficient_evidence", "observed": "insufficient_evidence", "correct": True,
+         "response": {"answers": {"factual_support": {"choice": "insufficient_evidence", "confidence": .99}}}},
+    ]
+    assert summarize(rows) == {"correct": 2, "total": 3, "false_accepts": 1,
+        "flagged_entries": 2, "supported_entries": 1, "supported_entries_flagged": 1,
+        "unsupported_entries_without_flags": 1}

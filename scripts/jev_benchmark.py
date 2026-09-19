@@ -8,7 +8,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.jev_client import JevClient, JevError, questions
+from src.jev_client import JevClient, JevError, PROTOCOL, questions
+from src.jev_review import REVIEW_THRESHOLD, review_flags
 from src.deposition_evidence import atomic_json
 
 FIXTURES = [
@@ -33,6 +34,20 @@ FIXTURES = [
 ]
 
 
+def summarize(results):
+    """Report model labels separately from actual review routing."""
+    supported = [r for r in results if r["expected"] == "supported"]
+    return {
+        "correct": sum(r["correct"] for r in results),
+        "total": len(results),
+        "false_accepts": sum(r["observed"] == "supported" and r["expected"] != "supported" for r in results),
+        "flagged_entries": sum(bool(review_flags(r["response"]["answers"])) for r in results),
+        "supported_entries": len(supported),
+        "supported_entries_flagged": sum(bool(review_flags(r["response"]["answers"])) for r in supported),
+        "unsupported_entries_without_flags": sum(not review_flags(r["response"]["answers"]) for r in results if r["expected"] != "supported"),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true", help="Send only the built-in fictional examples to TypeSafe.")
@@ -47,7 +62,7 @@ def main():
     if args.env_file:
         from dotenv import load_dotenv
         load_dotenv(args.env_file, override=False)
-    result = {"synthetic_only": True, "clinical_validation": False, "results": []}
+    result = {"synthetic_only": True, "clinical_validation": False, "protocol": PROTOCOL, "threshold": REVIEW_THRESHOLD, "results": []}
     try:
         client = JevClient()
         result["model"] = client.model
@@ -58,11 +73,9 @@ def main():
             result["results"].append({"id": identifier, "expected": expected, "observed": observed,
                                       "correct": expected == observed, "response": data})
             atomic_json(args.output, result)
-        result["correct"] = sum(r["correct"] for r in result["results"])
-        result["total"] = len(FIXTURES)
-        result["false_accepts"] = sum(r["observed"] == "supported" and r["expected"] != "supported" for r in result["results"])
+        result.update(summarize(result["results"]))
         atomic_json(args.output, result)
-        print(f"Synthetic results: {result['correct']}/{result['total']} expected labels; {result['false_accepts']} false accepts. Not clinical validation.")
+        print(f"Synthetic results: {result['correct']}/{result['total']} expected labels; {result['false_accepts']} overall-label false accepts; {result['supported_entries_flagged']}/{result['supported_entries']} supported entries flagged. Not clinical validation.")
         return 0 if result["correct"] == result["total"] else 1
     except JevError as exc:
         result["error"] = str(exc)

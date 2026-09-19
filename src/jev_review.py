@@ -26,6 +26,13 @@ NOTICE = (
 )
 
 
+def review_flags(answers):
+    """Use the same routing rule in exports and synthetic evaluations."""
+    return [key for key, answer in answers.items()
+            if answer["choice"] not in ("supported", "not_applicable")
+            or answer["confidence"] < REVIEW_THRESHOLD]
+
+
 def source_loader(store, case_id):
     """Only use this case's recorded originals and exact extraction revisions."""
     loaded = {}
@@ -142,9 +149,7 @@ def audit_entries(entries, documents, load, checkpoint_dir, progress=lambda _: N
                 atomic_json(checkpoint, {"signature": signature, "response": response})
             item["answers"] = response["answers"]
             item["usage"] = response["usage"]
-            item["flags"] = [key for key, answer in response["answers"].items()
-                             if answer["choice"] not in ("supported", "not_applicable")
-                             or answer["confidence"] < REVIEW_THRESHOLD]
+            item["flags"] = review_flags(response["answers"])
             item["status"] = "review_required" if item["flags"] else "no_flags"
             base["entries_checked"] += 1
         except JevError as exc:

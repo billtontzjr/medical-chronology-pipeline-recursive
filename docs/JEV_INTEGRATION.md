@@ -26,6 +26,21 @@ The first command validates fixtures without calling the API. The live command s
 
 The earlier manual playground smoke test returned the expected labels on six short examples using `jev-1.13.0`. That used a simpler single-question prompt and does not validate this six-dimension API integration. Local mocked HTTP tests validate implementation behavior, not Jev's judgment.
 
+## Live results: September 19, 2026
+
+The saved local key authenticated successfully against the pinned model. Production remains disabled. Only the fixed fictional fixtures were transmitted.
+
+| Run | Expected overall labels | Unsupported claims labeled supported | Correct entries flagged | Total entries flagged |
+| --- | --- | --- | --- | --- |
+| Baseline v1 | 16/18 | 0/13 | 5/5 | 18/18 |
+| Revised v2 | 17/18 | 0/13 | 5/5 | 18/18 |
+
+The fixtures contain **five** supported claims and thirteen unsupported claims. Earlier conversational reporting counted six supported claims incorrectly; the saved fixtures and these counts are authoritative. Raw sanitized responses are preserved in [baseline-v1.json](jev-evaluation/baseline-v1.json) and [revised-v2.json](jev-evaluation/revised-v2.json). Baseline prompts are in commit `ab74eff87f494b306612dd04a4e63cb7f0a25a7a`; the current adapter contains v2 prompts. The v2 revision separates dimension scope and distinguishes absent evidence from contradiction. It fixes the medication-label mismatch. The signature-date claim still receives insufficient evidence instead of contradiction.
+
+**This pilot fails the review-workload acceptance check:** every correct entry still receives a flag, mostly because at least one dimension falls below the unchanged 0.90 threshold. Zero false accepts on thirteen examples does not establish reliable error detection; flagging everything is not useful discrimination. Prompts were revised against the same fixtures, so v2 is a development result, not held-out validation. All six returned decisions are retained, but only the overall label has a manually specified label for each fixture. The benchmark now reports actual production routing alongside label accuracy using the shared routing rule.
+
+Keep the feature disabled for team use. Before activation, evaluate a separately labeled set of realistic, longer fictional records with per-dimension labels, establish acceptable missed-error and false-flag limits, and validate any prompt or threshold change on held-out examples. Test a synthetic case through the deployed workspace and confirm provider data arrangements before patient use. No live deployed-workspace or patient-data acceptance was completed here. Local mocked end-to-end tests cover export reports, visible issues, caching and unchanged prior versions.
+
 ## Review behavior and evidence
 
 The six checks cover overall factual support, encounter-date roles, attribution, negation, anatomy and procedure status. Nonapplicable dimensions are explicit; missing evidence is not a pass. All findings and confidence below 0.90 produce review flags. This threshold is a conservative routing heuristic, not a validated 90% clinical accuracy claim. Even all-supported results remain `human_review_required`.
