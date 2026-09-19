@@ -1,5 +1,7 @@
 # Medical case workspace
 
+Optional Jev API review can check final source-linked entries and add review flags without changing the narrative. It is disabled by default. See [Jev setup and synthetic acceptance](JEV_INTEGRATION.md) before enabling it.
+
 New medical-only cases use the authenticated `/workspace` UI and a supervised worker. Closing a browser does not cancel a job. Existing runs remain available with their original scope and model through `/?legacy=1&session_id=...`; they are never converted automatically.
 
 ## Scope and output

@@ -32,8 +32,9 @@ from .encounters import normalize, parse_entry, clean_labels, UNKNOWN
 from .word_export import chronology_docx
 from .output_safety import validate_destination
 from .companion_reports import generate_reports, COMPANION_PROTOCOL
+from .jev_review import audit_entries, source_loader, report_markdown, update_issues
 
-EXPORT_PROTOCOL = "medical-workspace-export-v4"
+EXPORT_PROTOCOL = "medical-workspace-export-v5"
 
 
 def header_date(value):
@@ -129,7 +130,7 @@ def review_source(store, case_id, data):
         target = data.get("target")
         issue = store.get(case_id, "issues", target)
         if issue and not issue.get("document_id"):
-            raise ValueError("This question concerns the case summary. Use Retry companion reports to regenerate it.")
+            raise ValueError("This question concerns a case-level report. Resolve its configuration problem, then use Regenerate exports to retry it.")
         doc = store.get(case_id, "documents", issue["document_id"] if issue else target)
         if not doc:
             raise ValueError("The review item is no longer available.")
@@ -812,6 +813,9 @@ class MedicalRun:
         self.phase("summary", "in_progress")
         entries = self.merged_entries()
         docs = self.store.all(self.case_id, "documents")
+        jev_report = audit_entries(entries, docs, source_loader(self.store, self.case_id),
+                                   self.work / "jev", self.checkpoint)
+        update_issues(self.store, self.case_id, jev_report)
         exclusions = [
             {"document_id": d["id"], "source_file": d["path"], **x}
             for d in docs
@@ -869,6 +873,7 @@ class MedicalRun:
                 self.case.get("dob"),
                 self.case.get("doi"),
                 companion_files,
+                jev_report,
             ]
         )[:20]
         folder = self.path / "versions" / version
@@ -893,11 +898,13 @@ class MedicalRun:
         )
         if pending and all(i.get("kind") == "companion_report" for i in pending):
             notice = "Draft complete—companion report review required. The detailed chronology is preserved; see the review report.\n\n"
+        if any(i.get("kind") == "jev_review" for i in pending):
+            notice = "Draft—manual review required. Jev has unresolved checks; flagged entries remain in the draft. Other source review questions may concern withheld material. See the review reports.\n\n"
         text = header + "\n\n".join(e["text"] for e in entries)
         docnames = {d["id"]: d["path"] for d in docs}
 
         def review_item(item):
-            where = docnames.get(item.get("document_id"), "Case companion report")
+            where = docnames.get(item.get("document_id"), "Case review report")
             pages = item.get("pages") or ([item["page"]] if item.get("page") else [])
             return (
                 item["title"]
@@ -921,6 +928,7 @@ class MedicalRun:
                 "version": version,
                 "policy": self.policy,
                 "model": self.case["model"],
+                "jev_review": {k: jev_report[k] for k in ("status", "entries_checked", "entries_unchecked")},
             },
             "chronology_markdown": text,
             "records": entries,
@@ -939,7 +947,9 @@ class MedicalRun:
             "verification.md": "# Evidence review\n\n"
             + str(len(entries))
             + " generated entries retain checked source references. This is not a human sign-off.\n\n"
-            + review,
+            + review + "\n\n" + report_markdown(jev_report),
+            "jev_review.md": report_markdown(jev_report),
+            "jev_review.json": json.dumps(jev_report, indent=2),
             "ocr_coverage.json": json.dumps(
                 [
                     {
