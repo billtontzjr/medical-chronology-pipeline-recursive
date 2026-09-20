@@ -1,0 +1,1079 @@
+{
+  "synthetic_only": true,
+  "clinical_validation": false,
+  "suite": "holdout",
+  "protocol": "chronology-jev-v3",
+  "threshold": 0.9,
+  "results": [
+    {
+      "id": "dates_supported",
+      "expected": "supported",
+      "observed": "supported",
+      "correct": true,
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "factual_support": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.99,
+            "probabilities": {
+              "insufficient_evidence": 0.0,
+              "supported": 1.0,
+              "contradicted": 0.0
+            }
+          },
+          "date_role": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 1.0,
+            "probabilities": {
+              "not_applicable": 0.0,
+              "insufficient_evidence": 0.0,
+              "supported": 1.0,
+              "contradicted": 0.0
+            }
+          },
+          "attribution": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.9,
+            "probabilities": {
+              "not_applicable": 0.93,
+              "insufficient_evidence": 0.02,
+              "supported": 0.05,
+              "contradicted": 0.0
+            }
+          },
+          "negation": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.94,
+            "probabilities": {
+              "not_applicable": 0.96,
+              "insufficient_evidence": 0.0,
+              "supported": 0.04,
+              "contradicted": 0.0
+            }
+          },
+          "anatomy": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.99,
+            "probabilities": {
+              "not_applicable": 1.0,
+              "insufficient_evidence": 0.0,
+              "supported": 0.0,
+              "contradicted": 0.0
+            }
+          },
+          "procedure_status": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.92,
+            "probabilities": {
+              "not_applicable": 0.04,
+              "insufficient_evidence": 0.01,
+              "supported": 0.95,
+              "contradicted": 0.0
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 2460,
+          "output_tokens": 335
+        }
+      }
+    },
+    {
+      "id": "dates_unsupported",
+      "expected": "contradicted",
+      "observed": "contradicted",
+      "correct": true,
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "factual_support": {
+            "type": "choice",
+            "choice": "contradicted",
+            "confidence": 0.99,
+            "probabilities": {
+              "supported": 0.0,
+              "insufficient_evidence": 0.0,
+              "contradicted": 1.0
+            }
+          },
+          "date_role": {
+            "type": "choice",
+            "choice": "contradicted",
+            "confidence": 1.0,
+            "probabilities": {
+              "supported": 0.0,
+              "not_applicable": 0.0,
+              "insufficient_evidence": 0.0,
+              "contradicted": 1.0
+            }
+          },
+          "attribution": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.86,
+            "probabilities": {
+              "supported": 0.05,
+              "not_applicable": 0.9,
+              "insufficient_evidence": 0.03,
+              "contradicted": 0.02
+            }
+          },
+          "negation": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.95,
+            "probabilities": {
+              "supported": 0.03,
+              "not_applicable": 0.96,
+              "contradicted": 0.01,
+              "insufficient_evidence": 0.0
+            }
+          },
+          "anatomy": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.99,
+            "probabilities": {
+              "supported": 0.0,
+              "not_applicable": 1.0,
+              "contradicted": 0.0,
+              "insufficient_evidence": 0.0
+            }
+          },
+          "procedure_status": {
+            "type": "choice",
+            "choice": "contradicted",
+            "confidence": 0.96,
+            "probabilities": {
+              "supported": 0.02,
+              "not_applicable": 0.01,
+              "contradicted": 0.96,
+              "insufficient_evidence": 0.01
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 2460,
+          "output_tokens": 344
+        }
+      }
+    },
+    {
+      "id": "amendment_supported",
+      "expected": "supported",
+      "observed": "supported",
+      "correct": true,
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "factual_support": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.94,
+            "probabilities": {
+              "contradicted": 0.01,
+              "insufficient_evidence": 0.03,
+              "supported": 0.96
+            }
+          },
+          "date_role": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 1.0,
+            "probabilities": {
+              "not_applicable": 1.0,
+              "contradicted": 0.0,
+              "insufficient_evidence": 0.0,
+              "supported": 0.0
+            }
+          },
+          "attribution": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.78,
+            "probabilities": {
+              "not_applicable": 0.83,
+              "contradicted": 0.01,
+              "insufficient_evidence": 0.11,
+              "supported": 0.05
+            }
+          },
+          "negation": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.87,
+            "probabilities": {
+              "not_applicable": 0.06,
+              "contradicted": 0.01,
+              "insufficient_evidence": 0.02,
+              "supported": 0.91
+            }
+          },
+          "anatomy": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.99,
+            "probabilities": {
+              "not_applicable": 0.0,
+              "contradicted": 0.0,
+              "insufficient_evidence": 0.0,
+              "supported": 1.0
+            }
+          },
+          "procedure_status": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.99,
+            "probabilities": {
+              "not_applicable": 0.99,
+              "contradicted": 0.0,
+              "insufficient_evidence": 0.01,
+              "supported": 0.0
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 2436,
+          "output_tokens": 335
+        }
+      }
+    },
+    {
+      "id": "amendment_unsupported",
+      "expected": "contradicted",
+      "observed": "contradicted",
+      "correct": true,
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "factual_support": {
+            "type": "choice",
+            "choice": "contradicted",
+            "confidence": 0.99,
+            "probabilities": {
+              "insufficient_evidence": 0.01,
+              "supported": 0.0,
+              "contradicted": 0.99
+            }
+          },
+          "date_role": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 1.0,
+            "probabilities": {
+              "supported": 0.0,
+              "insufficient_evidence": 0.0,
+              "contradicted": 0.0,
+              "not_applicable": 1.0
+            }
+          },
+          "attribution": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.76,
+            "probabilities": {
+              "not_applicable": 0.83,
+              "insufficient_evidence": 0.06,
+              "supported": 0.05,
+              "contradicted": 0.06
+            }
+          },
+          "negation": {
+            "type": "choice",
+            "choice": "contradicted",
+            "confidence": 0.98,
+            "probabilities": {
+              "not_applicable": 0.0,
+              "insufficient_evidence": 0.0,
+              "supported": 0.01,
+              "contradicted": 0.99
+            }
+          },
+          "anatomy": {
+            "type": "choice",
+            "choice": "contradicted",
+            "confidence": 0.96,
+            "probabilities": {
+              "not_applicable": 0.0,
+              "insufficient_evidence": 0.0,
+              "supported": 0.02,
+              "contradicted": 0.98
+            }
+          },
+          "procedure_status": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.98,
+            "probabilities": {
+              "not_applicable": 0.99,
+              "insufficient_evidence": 0.0,
+              "supported": 0.0,
+              "contradicted": 0.01
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 2436,
+          "output_tokens": 344
+        }
+      }
+    },
+    {
+      "id": "procedure_supported",
+      "expected": "supported",
+      "observed": "supported",
+      "correct": true,
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "factual_support": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 1.0,
+            "probabilities": {
+              "contradicted": 0.0,
+              "supported": 1.0,
+              "insufficient_evidence": 0.0
+            }
+          },
+          "date_role": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 1.0,
+            "probabilities": {
+              "contradicted": 0.0,
+              "not_applicable": 1.0,
+              "supported": 0.0,
+              "insufficient_evidence": 0.0
+            }
+          },
+          "attribution": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.39,
+            "probabilities": {
+              "contradicted": 0.0,
+              "not_applicable": 0.55,
+              "supported": 0.2,
+              "insufficient_evidence": 0.25
+            }
+          },
+          "negation": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.99,
+            "probabilities": {
+              "contradicted": 0.0,
+              "not_applicable": 1.0,
+              "supported": 0.0,
+              "insufficient_evidence": 0.0
+            }
+          },
+          "anatomy": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 1.0,
+            "probabilities": {
+              "contradicted": 0.0,
+              "not_applicable": 0.0,
+              "supported": 1.0,
+              "insufficient_evidence": 0.0
+            }
+          },
+          "procedure_status": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 1.0,
+            "probabilities": {
+              "contradicted": 0.0,
+              "not_applicable": 0.0,
+              "supported": 1.0,
+              "insufficient_evidence": 0.0
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 2425,
+          "output_tokens": 335
+        }
+      }
+    },
+    {
+      "id": "procedure_unsupported",
+      "expected": "contradicted",
+      "observed": "contradicted",
+      "correct": true,
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "factual_support": {
+            "type": "choice",
+            "choice": "contradicted",
+            "confidence": 1.0,
+            "probabilities": {
+              "contradicted": 1.0,
+              "supported": 0.0,
+              "insufficient_evidence": 0.0
+            }
+          },
+          "date_role": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.99,
+            "probabilities": {
+              "insufficient_evidence": 0.0,
+              "contradicted": 0.01,
+              "not_applicable": 0.99,
+              "supported": 0.0
+            }
+          },
+          "attribution": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.72,
+            "probabilities": {
+              "insufficient_evidence": 0.06,
+              "contradicted": 0.13,
+              "not_applicable": 0.79,
+              "supported": 0.02
+            }
+          },
+          "negation": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.99,
+            "probabilities": {
+              "insufficient_evidence": 0.0,
+              "contradicted": 0.01,
+              "not_applicable": 0.99,
+              "supported": 0.0
+            }
+          },
+          "anatomy": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.82,
+            "probabilities": {
+              "contradicted": 0.06,
+              "supported": 0.86,
+              "not_applicable": 0.01,
+              "insufficient_evidence": 0.07
+            }
+          },
+          "procedure_status": {
+            "type": "choice",
+            "choice": "contradicted",
+            "confidence": 1.0,
+            "probabilities": {
+              "supported": 0.0,
+              "insufficient_evidence": 0.0,
+              "not_applicable": 0.0,
+              "contradicted": 1.0
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 2425,
+          "output_tokens": 341
+        }
+      }
+    },
+    {
+      "id": "attribution_supported",
+      "expected": "supported",
+      "observed": "supported",
+      "correct": true,
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "factual_support": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 1.0,
+            "probabilities": {
+              "insufficient_evidence": 0.0,
+              "supported": 1.0,
+              "contradicted": 0.0
+            }
+          },
+          "date_role": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 1.0,
+            "probabilities": {
+              "insufficient_evidence": 0.0,
+              "not_applicable": 1.0,
+              "contradicted": 0.0,
+              "supported": 0.0
+            }
+          },
+          "attribution": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.99,
+            "probabilities": {
+              "insufficient_evidence": 0.0,
+              "not_applicable": 0.0,
+              "contradicted": 0.0,
+              "supported": 1.0
+            }
+          },
+          "negation": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.92,
+            "probabilities": {
+              "insufficient_evidence": 0.0,
+              "not_applicable": 0.94,
+              "contradicted": 0.0,
+              "supported": 0.06
+            }
+          },
+          "anatomy": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.94,
+            "probabilities": {
+              "insufficient_evidence": 0.0,
+              "not_applicable": 0.04,
+              "contradicted": 0.0,
+              "supported": 0.96
+            }
+          },
+          "procedure_status": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.75,
+            "probabilities": {
+              "insufficient_evidence": 0.0,
+              "not_applicable": 0.82,
+              "contradicted": 0.0,
+              "supported": 0.18
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 2425,
+          "output_tokens": 335
+        }
+      }
+    },
+    {
+      "id": "attribution_unsupported",
+      "expected": "contradicted",
+      "observed": "contradicted",
+      "correct": true,
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "factual_support": {
+            "type": "choice",
+            "choice": "contradicted",
+            "confidence": 0.89,
+            "probabilities": {
+              "contradicted": 0.93,
+              "supported": 0.0,
+              "insufficient_evidence": 0.07
+            }
+          },
+          "date_role": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.99,
+            "probabilities": {
+              "contradicted": 0.01,
+              "not_applicable": 0.99,
+              "supported": 0.0,
+              "insufficient_evidence": 0.0
+            }
+          },
+          "attribution": {
+            "type": "choice",
+            "choice": "contradicted",
+            "confidence": 0.93,
+            "probabilities": {
+              "insufficient_evidence": 0.03,
+              "not_applicable": 0.0,
+              "supported": 0.02,
+              "contradicted": 0.95
+            }
+          },
+          "negation": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.83,
+            "probabilities": {
+              "contradicted": 0.12,
+              "not_applicable": 0.87,
+              "supported": 0.0,
+              "insufficient_evidence": 0.01
+            }
+          },
+          "anatomy": {
+            "type": "choice",
+            "choice": "insufficient_evidence",
+            "confidence": 0.26,
+            "probabilities": {
+              "insufficient_evidence": 0.45,
+              "not_applicable": 0.08,
+              "supported": 0.31,
+              "contradicted": 0.16
+            }
+          },
+          "procedure_status": {
+            "type": "choice",
+            "choice": "contradicted",
+            "confidence": 0.85,
+            "probabilities": {
+              "contradicted": 0.89,
+              "not_applicable": 0.0,
+              "supported": 0.02,
+              "insufficient_evidence": 0.09
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 2418,
+          "output_tokens": 347
+        }
+      }
+    },
+    {
+      "id": "negation_supported",
+      "expected": "supported",
+      "observed": "supported",
+      "correct": true,
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "factual_support": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 1.0,
+            "probabilities": {
+              "supported": 1.0,
+              "insufficient_evidence": 0.0,
+              "contradicted": 0.0
+            }
+          },
+          "date_role": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 1.0,
+            "probabilities": {
+              "supported": 0.0,
+              "not_applicable": 1.0,
+              "insufficient_evidence": 0.0,
+              "contradicted": 0.0
+            }
+          },
+          "attribution": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.99,
+            "probabilities": {
+              "supported": 0.99,
+              "not_applicable": 0.01,
+              "insufficient_evidence": 0.0,
+              "contradicted": 0.0
+            }
+          },
+          "negation": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.91,
+            "probabilities": {
+              "supported": 0.94,
+              "not_applicable": 0.01,
+              "insufficient_evidence": 0.04,
+              "contradicted": 0.01
+            }
+          },
+          "anatomy": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.74,
+            "probabilities": {
+              "supported": 0.81,
+              "not_applicable": 0.18,
+              "insufficient_evidence": 0.01,
+              "contradicted": 0.0
+            }
+          },
+          "procedure_status": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.99,
+            "probabilities": {
+              "supported": 0.01,
+              "not_applicable": 0.99,
+              "insufficient_evidence": 0.0,
+              "contradicted": 0.0
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 2417,
+          "output_tokens": 332
+        }
+      }
+    },
+    {
+      "id": "negation_unsupported",
+      "expected": "contradicted",
+      "observed": "contradicted",
+      "correct": true,
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "factual_support": {
+            "type": "choice",
+            "choice": "contradicted",
+            "confidence": 1.0,
+            "probabilities": {
+              "supported": 0.0,
+              "contradicted": 1.0,
+              "insufficient_evidence": 0.0
+            }
+          },
+          "date_role": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 1.0,
+            "probabilities": {
+              "insufficient_evidence": 0.0,
+              "supported": 0.0,
+              "contradicted": 0.0,
+              "not_applicable": 1.0
+            }
+          },
+          "attribution": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.71,
+            "probabilities": {
+              "insufficient_evidence": 0.05,
+              "supported": 0.79,
+              "contradicted": 0.14,
+              "not_applicable": 0.02
+            }
+          },
+          "negation": {
+            "type": "choice",
+            "choice": "contradicted",
+            "confidence": 0.99,
+            "probabilities": {
+              "insufficient_evidence": 0.0,
+              "supported": 0.0,
+              "contradicted": 1.0,
+              "not_applicable": 0.0
+            }
+          },
+          "anatomy": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.46,
+            "probabilities": {
+              "insufficient_evidence": 0.23,
+              "supported": 0.59,
+              "contradicted": 0.05,
+              "not_applicable": 0.13
+            }
+          },
+          "procedure_status": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.99,
+            "probabilities": {
+              "insufficient_evidence": 0.0,
+              "supported": 0.0,
+              "contradicted": 0.01,
+              "not_applicable": 0.99
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 2417,
+          "output_tokens": 338
+        }
+      }
+    },
+    {
+      "id": "missing_findings_supported",
+      "expected": "supported",
+      "observed": "supported",
+      "correct": true,
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "factual_support": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.99,
+            "probabilities": {
+              "supported": 1.0,
+              "contradicted": 0.0,
+              "insufficient_evidence": 0.0
+            }
+          },
+          "date_role": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 1.0,
+            "probabilities": {
+              "not_applicable": 0.0,
+              "supported": 1.0,
+              "contradicted": 0.0,
+              "insufficient_evidence": 0.0
+            }
+          },
+          "attribution": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.94,
+            "probabilities": {
+              "not_applicable": 0.96,
+              "supported": 0.03,
+              "contradicted": 0.0,
+              "insufficient_evidence": 0.01
+            }
+          },
+          "negation": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 1.0,
+            "probabilities": {
+              "not_applicable": 1.0,
+              "supported": 0.0,
+              "contradicted": 0.0,
+              "insufficient_evidence": 0.0
+            }
+          },
+          "anatomy": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.97,
+            "probabilities": {
+              "not_applicable": 0.02,
+              "supported": 0.98,
+              "contradicted": 0.0,
+              "insufficient_evidence": 0.0
+            }
+          },
+          "procedure_status": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 1.0,
+            "probabilities": {
+              "not_applicable": 0.0,
+              "supported": 1.0,
+              "contradicted": 0.0,
+              "insufficient_evidence": 0.0
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 2447,
+          "output_tokens": 332
+        }
+      }
+    },
+    {
+      "id": "missing_findings_unsupported",
+      "expected": "insufficient_evidence",
+      "observed": "insufficient_evidence",
+      "correct": true,
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "factual_support": {
+            "type": "choice",
+            "choice": "insufficient_evidence",
+            "confidence": 0.94,
+            "probabilities": {
+              "supported": 0.0,
+              "insufficient_evidence": 0.96,
+              "contradicted": 0.04
+            }
+          },
+          "date_role": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.99,
+            "probabilities": {
+              "supported": 0.0,
+              "not_applicable": 1.0,
+              "insufficient_evidence": 0.0,
+              "contradicted": 0.0
+            }
+          },
+          "attribution": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.69,
+            "probabilities": {
+              "supported": 0.05,
+              "not_applicable": 0.76,
+              "insufficient_evidence": 0.17,
+              "contradicted": 0.02
+            }
+          },
+          "negation": {
+            "type": "choice",
+            "choice": "insufficient_evidence",
+            "confidence": 0.79,
+            "probabilities": {
+              "supported": 0.02,
+              "not_applicable": 0.1,
+              "insufficient_evidence": 0.85,
+              "contradicted": 0.03
+            }
+          },
+          "anatomy": {
+            "type": "choice",
+            "choice": "insufficient_evidence",
+            "confidence": 0.97,
+            "probabilities": {
+              "supported": 0.01,
+              "not_applicable": 0.01,
+              "insufficient_evidence": 0.98,
+              "contradicted": 0.0
+            }
+          },
+          "procedure_status": {
+            "type": "choice",
+            "choice": "not_applicable",
+            "confidence": 0.38,
+            "probabilities": {
+              "supported": 0.05,
+              "not_applicable": 0.53,
+              "insufficient_evidence": 0.29,
+              "contradicted": 0.13
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 2443,
+          "output_tokens": 353
+        }
+      }
+    }
+  ],
+  "model": "jev-1.13.0",
+  "correct": 12,
+  "total": 12,
+  "false_accepts": 0,
+  "flagged_entries": 10,
+  "supported_entries": 6,
+  "supported_entries_flagged": 4,
+  "unsupported_entries_without_flags": 0,
+  "expected_dimensions": {
+    "dates_supported": {
+      "factual_support": "supported",
+      "date_role": "supported",
+      "attribution": "not_applicable",
+      "negation": "not_applicable",
+      "anatomy": "not_applicable",
+      "procedure_status": "not_applicable"
+    },
+    "dates_unsupported": {
+      "factual_support": "contradicted",
+      "date_role": "contradicted",
+      "attribution": "not_applicable",
+      "negation": "not_applicable",
+      "anatomy": "not_applicable",
+      "procedure_status": "not_applicable"
+    },
+    "amendment_supported": {
+      "factual_support": "supported",
+      "date_role": "not_applicable",
+      "attribution": "not_applicable",
+      "negation": "supported",
+      "anatomy": "supported",
+      "procedure_status": "not_applicable"
+    },
+    "amendment_unsupported": {
+      "factual_support": "contradicted",
+      "date_role": "not_applicable",
+      "attribution": "not_applicable",
+      "negation": "contradicted",
+      "anatomy": "contradicted",
+      "procedure_status": "not_applicable"
+    },
+    "procedure_supported": {
+      "factual_support": "supported",
+      "date_role": "not_applicable",
+      "attribution": "not_applicable",
+      "negation": "not_applicable",
+      "anatomy": "supported",
+      "procedure_status": "supported"
+    },
+    "procedure_unsupported": {
+      "factual_support": "contradicted",
+      "date_role": "not_applicable",
+      "attribution": "not_applicable",
+      "negation": "not_applicable",
+      "anatomy": "supported",
+      "procedure_status": "contradicted"
+    },
+    "attribution_supported": {
+      "factual_support": "supported",
+      "date_role": "not_applicable",
+      "attribution": "supported",
+      "negation": "not_applicable",
+      "anatomy": "supported",
+      "procedure_status": "supported"
+    },
+    "attribution_unsupported": {
+      "factual_support": "contradicted",
+      "date_role": "not_applicable",
+      "attribution": "contradicted",
+      "negation": "not_applicable",
+      "anatomy": "supported",
+      "procedure_status": "contradicted"
+    },
+    "negation_supported": {
+      "factual_support": "supported",
+      "date_role": "not_applicable",
+      "attribution": "supported",
+      "negation": "supported",
+      "anatomy": "supported",
+      "procedure_status": "not_applicable"
+    },
+    "negation_unsupported": {
+      "factual_support": "contradicted",
+      "date_role": "not_applicable",
+      "attribution": "supported",
+      "negation": "contradicted",
+      "anatomy": "supported",
+      "procedure_status": "not_applicable"
+    },
+    "missing_findings_supported": {
+      "factual_support": "supported",
+      "date_role": "supported",
+      "attribution": "not_applicable",
+      "negation": "not_applicable",
+      "anatomy": "supported",
+      "procedure_status": "supported"
+    },
+    "missing_findings_unsupported": {
+      "factual_support": "insufficient_evidence",
+      "date_role": "not_applicable",
+      "attribution": "not_applicable",
+      "negation": "insufficient_evidence",
+      "anatomy": "insufficient_evidence",
+      "procedure_status": "insufficient_evidence"
+    }
+  },
+  "dimension_correct": 67,
+  "dimension_total": 72,
+  "engineering_gate_passed": false,
+  "evaluation_date": "2026-09-19"
+}

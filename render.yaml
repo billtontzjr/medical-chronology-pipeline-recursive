@@ -5,6 +5,10 @@ services:
     dockerfilePath: ./Dockerfile
     healthCheckPath: /healthz
     envVars:
+      - key: JEV_ENABLED
+        value: "false"
+      - key: JEV_MODEL
+        value: jev-1.13.0
       - key: TEAM_PASSWORD
         sync: false
       - key: SESSION_DATA_DIR
@@ -27,4 +31,3 @@ services:
       name: medical-data
       mountPath: /app/data
       sizeGB: 10
-
