@@ -124,6 +124,7 @@ def main():
     parser.add_argument('--live', action='store_true')
     parser.add_argument('--env-file', type=Path)
     parser.add_argument('--output', type=Path, default=Path('/tmp/jev-workspace-smoke.json'))
+    parser.add_argument('--preview-port', type=int, help='Keep the isolated fictional workspace open on loopback for browser testing.')
     args = parser.parse_args()
     if not args.live:
         print('Use --live to test a new isolated fictional case with the real Jev API.')
@@ -133,8 +134,17 @@ def main():
         load_dotenv(args.env_file, override=False)
     with tempfile.TemporaryDirectory(prefix='jev-fictional-workspace-') as temp:
         result = run(Path(temp))
-    args.output.write_text(json.dumps(result, indent=2) + '\n')
-    print('Fictional workspace smoke passed: real Jev, source preview, authenticated downloads, cache and immutable history.')
+        args.output.write_text(json.dumps(result, indent=2) + '\n')
+        print('Fictional workspace smoke passed: real Jev, source preview, authenticated downloads, cache and immutable history.', flush=True)
+        if args.preview_port:
+            from aiohttp import web
+            from src.workspace_api import WorkspaceAPI
+            from src.case_store import CaseStore
+            from serve import create_app
+            api = WorkspaceAPI(ROOT)
+            api.store = CaseStore(Path(temp))
+            app = create_app('http://127.0.0.1:1', 'fictional-local-smoke-secret', api)
+            web.run_app(app, host='127.0.0.1', port=args.preview_port, access_log=None)
 
 
 if __name__ == '__main__':

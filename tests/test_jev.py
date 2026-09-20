@@ -68,7 +68,9 @@ def test_oversized_entry_does_not_block_other_entries(tmp_path, monkeypatch):
     seen = []
     def handler(request):
         seen.append(request)
-        return httpx.Response(200, json=response())
+        payload = response()
+        payload["answers"] = {"factual_support": payload["answers"]["factual_support"]}
+        return httpx.Response(200, json=payload)
     client = JevClient(api_key="fictional", transport=httpx.MockTransport(handler))
     entries = [{**ENTRIES[0], "id": "too-long", "text": "x" * 30000}, *ENTRIES]
     report = run(tmp_path, client, entries=entries)
@@ -87,7 +89,9 @@ class FakeClient:
         self.calls = []; self.answer = answer or response()
     def evaluate(self, state, schema):
         self.calls.append(state)
-        return copy.deepcopy(self.answer)
+        result = copy.deepcopy(self.answer)
+        result["answers"] = {k: v for k, v in result["answers"].items() if k in schema}
+        return result
 
 
 def run(tmp_path, client, entries=None, docs=None, text="MRI was recommended."):
@@ -217,7 +221,7 @@ def test_full_workspace_export_keeps_jev_flags_and_prior_versions(tmp_path, monk
     assert all(p.read_bytes() == content for p, content in old.items())
     assert "=== SOURCE PDF PAGE 1 ===" in fake.calls[0]["source_pages"][0]["text"]
     runner.run("export")
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 2
     monkeypatch.setenv("JEV_ENABLED", "false")
     runner.run("export")
     assert any(i["kind"] == "jev_review" for i in store.all(case["id"], "issues"))
@@ -283,3 +287,66 @@ def test_holdout_exit_fails_when_correct_labels_still_overflag(tmp_path, monkeyp
     result = json.loads((tmp_path / "results.json").read_text())
     assert result["correct"] == 12
     assert not result["engineering_gate_passed"]
+
+
+def test_triage_only_requests_diagnostics_for_flagged_entries(tmp_path, monkeypatch):
+    monkeypatch.setenv('JEV_ENABLED', 'true')
+    schemas = []
+    class Client(FakeClient):
+        def evaluate(self, state, schema):
+            schemas.append(set(schema))
+            return super().evaluate(state, schema)
+    report = run(tmp_path, Client())
+    assert schemas == [{'factual_support'}]
+    assert report['results'][0]['diagnostics_status'] == 'not_requested'
+    assert set(report['results'][0]['answers']) == {'factual_support'}
+
+
+def test_failed_diagnostics_preserve_primary_finding_and_resume_only_details(tmp_path, monkeypatch):
+    monkeypatch.setenv('JEV_ENABLED', 'true')
+    schemas = []
+    class Client(FakeClient):
+        fail_details = True
+        def evaluate(self, state, schema):
+            schemas.append(set(schema))
+            if 'factual_support' not in schema and self.fail_details:
+                raise JevError('Provider unavailable.')
+            return super().evaluate(state, schema)
+    client = Client(response('contradicted'))
+    report = run(tmp_path, client)
+    item = report['results'][0]
+    assert report['status'] == 'incomplete' and report['entries_checked'] == 1
+    assert report['diagnostics_incomplete'] == 1
+    assert item['status'] == 'review_required' and item['flags'] == ['factual_support']
+    client.fail_details = False
+    report = run(tmp_path, client)
+    assert report['results'][0]['diagnostics_status'] == 'complete'
+    assert schemas.count({'factual_support'}) == 1
+    assert len(schemas) == 3
+    run(tmp_path, client)
+    assert len(schemas) == 3
+
+
+def test_diagnostics_cannot_overturn_primary_uncertainty(tmp_path, monkeypatch):
+    monkeypatch.setenv('JEV_ENABLED', 'true')
+    class Client(FakeClient):
+        def evaluate(self, state, schema):
+            self.answer = response('supported', .5 if 'factual_support' in schema else 1)
+            return super().evaluate(state, schema)
+    report = run(tmp_path, Client())
+    item = report['results'][0]
+    assert item['status'] == 'review_required' and item['flags'] == ['factual_support']
+    assert item['diagnostics_status'] == 'complete'
+
+
+def test_request_budget_counts_primary_and_diagnostic_calls(tmp_path, monkeypatch):
+    monkeypatch.setenv('JEV_ENABLED', 'true')
+    monkeypatch.setattr('src.jev_review.MAX_NEW_REQUESTS', 1)
+    client = FakeClient(response('contradicted'))
+    report = run(tmp_path, client)
+    assert len(client.calls) == 1
+    assert report['diagnostics_incomplete'] == 1
+    assert report['results'][0]['status'] == 'review_required'
+    report = run(tmp_path, client)
+    assert len(client.calls) == 2
+    assert report['diagnostics_incomplete'] == 0

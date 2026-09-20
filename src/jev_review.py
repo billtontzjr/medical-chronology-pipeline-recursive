@@ -19,7 +19,8 @@ CHECK_LABELS = {"factual_support": "factual wording", "date_role": "encounter da
                 "attribution": "patient and provider attribution", "negation": "symptom presence or absence",
                 "anatomy": "body side and location", "procedure_status": "planned versus completed care"}
 NOTICE = (
-    "Jev is an additional automated review of final entries against cited source pages. "
+    "Jev first checks overall support for final entries against cited source pages. "
+    "Detailed checks run only when the overall check requires review. "
     "It does not certify medical accuracy, correct OCR, check every uncited page, establish "
     "missing-encounter coverage, or replace human review. Flagged entries remain in the draft. "
     "Confidence is a model statistic, not a guarantee of correctness."
@@ -123,10 +124,37 @@ def audit_entries(entries, documents, load, checkpoint_dir, progress=lambda _: N
     except JevError as exc:
         return {**base, "status": "incomplete", "error": str(exc)}
     base["model"] = client.model
-    schema = questions()
+    all_questions = questions()
+    schema = {"factual_support": all_questions["factual_support"]}
+    diagnostic_schema = {k: v for k, v in all_questions.items() if k != "factual_support"}
     docs = {doc["id"]: doc for doc in documents}
     sent = 0
     api_failure = None
+    def evaluate_stage(state, stage_schema, signature, checkpoint):
+        nonlocal sent, api_failure
+        if checkpoint.exists():
+            try:
+                saved = json.loads(checkpoint.read_text())
+                if not isinstance(saved, dict) or saved.get("signature") != signature:
+                    raise JevError("Checkpoint signature mismatch.")
+                return validate_response(saved["response"], stage_schema, client.model)
+            except (ValueError, KeyError, TypeError, JevError):
+                raise JevError("A saved Jev checkpoint is invalid; preserve it for investigation before retrying.") from None
+        if api_failure:
+            raise JevError(api_failure)
+        if sent >= MAX_NEW_REQUESTS:
+            raise JevError("This run reached its Jev request limit. Resume to check the remaining entries.")
+        sent += 1
+        try:
+            response = validate_response(client.evaluate(state, stage_schema), stage_schema, client.model)
+        except JevInputError:
+            raise
+        except JevError as exc:
+            api_failure = str(exc)
+            raise
+        atomic_json(checkpoint, {"signature": signature, "response": response})
+        return response
+
     for index, entry in enumerate(entries, 1):
         progress(f"Jev source review: entry {index} of {len(entries)}")
         item = {"entry_id": entry["id"], "document_id": entry.get("document_id"),
@@ -137,34 +165,27 @@ def audit_entries(entries, documents, load, checkpoint_dir, progress=lambda _: N
             signature = digest([PROTOCOL, client.model, schema, REVIEW_THRESHOLD, entry, state, links])
             item["signature"] = signature
             checkpoint = Path(checkpoint_dir) / (signature + ".json")
-            response = None
-            if checkpoint.exists():
-                try:
-                    saved = json.loads(checkpoint.read_text())
-                    if not isinstance(saved, dict) or saved.get("signature") != signature:
-                        raise JevError("Checkpoint signature mismatch.")
-                    response = validate_response(saved["response"], schema, client.model)
-                except (ValueError, KeyError, JevError):
-                    raise JevError("A saved Jev checkpoint is invalid; preserve it for investigation before retrying.") from None
-            if response is None:
-                if api_failure:
-                    raise JevError(api_failure)
-                if sent >= MAX_NEW_REQUESTS:
-                    raise JevError("This run reached its Jev request limit. Resume to check the remaining entries.")
-                sent += 1
-                try:
-                    response = validate_response(client.evaluate(state, schema), schema, client.model)
-                except JevInputError:
-                    raise
-                except JevError as exc:
-                    # A single provider failure must not trigger hundreds of doomed calls.
-                    api_failure = str(exc)
-                    raise
-                atomic_json(checkpoint, {"signature": signature, "response": response})
-            item["answers"] = response["answers"]
-            item["usage"] = response["usage"]
+            response = evaluate_stage(state, schema, signature, checkpoint)
+            item["answers"] = dict(response["answers"])
+            item["usage"] = dict(response["usage"])
             item["flags"] = review_flags(response["answers"])
             item["status"] = "review_required" if item["flags"] else "no_flags"
+            item["diagnostics_status"] = "not_requested"
+            if item["flags"]:
+                diagnostic_signature = digest([signature, diagnostic_schema, "diagnostics"])
+                diagnostic_path = Path(checkpoint_dir) / (diagnostic_signature + ".json")
+                try:
+                    details = evaluate_stage(state, diagnostic_schema, diagnostic_signature, diagnostic_path)
+                    item["answers"].update(details["answers"])
+                    item["flags"] = review_flags(item["answers"])
+                    item["diagnostics_status"] = "complete"
+                    for key, value in details["usage"].items():
+                        item["usage"][key] = item["usage"].get(key, 0) + value
+                except (JevError, OSError) as exc:
+                    # A failed explanation can never erase a successful primary flag.
+                    item["diagnostics_status"] = "incomplete"
+                    item["diagnostics_error"] = str(exc) if isinstance(exc, JevError) else "The diagnostic checkpoint could not be read or saved safely."
+                    item["reason"] = review_reason(item["answers"]) + " Detailed checks incomplete: " + item["diagnostics_error"]
             base["entries_checked"] += 1
         except JevError as exc:
             item["reason"] = str(exc)
@@ -173,7 +194,8 @@ def audit_entries(entries, documents, load, checkpoint_dir, progress=lambda _: N
             item["reason"] = "Source evidence could not be loaded safely; this entry was not checked by Jev."
         base["results"].append(item)
     base["entries_unchecked"] = len(entries) - base["entries_checked"]
-    base["status"] = "incomplete" if base["entries_unchecked"] or not entries else "human_review_required"
+    base["diagnostics_incomplete"] = sum(item.get("diagnostics_status") == "incomplete" for item in base["results"])
+    base["status"] = "incomplete" if base["entries_unchecked"] or base["diagnostics_incomplete"] or not entries else "human_review_required"
     return base
 
 
@@ -189,6 +211,8 @@ def report_markdown(report):
         lines.extend(["", "Jev was disabled for this export. No records were sent to TypeSafe by this stage."])
     for item in report["results"]:
         lines.extend(["", "## Entry " + item["entry_id"], "", item["text"], "", "Result: " + item["status"]])
+        if item.get("diagnostics_status"):
+            lines.append("Detailed checks: " + item["diagnostics_status"].replace("_", " "))
         if item.get("reason"):
             lines.append(item["reason"])
         for key, answer in item.get("answers", {}).items():

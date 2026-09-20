@@ -9,7 +9,7 @@ import httpx
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_MODEL = "jev-1.13.0"
-PROTOCOL = "chronology-jev-v3"
+PROTOCOL = "chronology-jev-v4"
 MAX_REQUEST_BYTES = 28000  # Conservative bound below the 32k per-question token limit.
 
 
