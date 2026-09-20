@@ -241,3 +241,45 @@ def test_benchmark_distinguishes_labels_from_review_routing():
     assert summarize(rows) == {"correct": 2, "total": 3, "false_accepts": 1,
         "flagged_entries": 2, "supported_entries": 1, "supported_entries_flagged": 1,
         "unsupported_entries_without_flags": 1}
+
+
+def test_uncertainty_is_not_presented_as_a_source_contradiction():
+    from src.jev_review import review_reason, review_flags
+    answers = {
+        "anatomy": {"choice": "not_applicable", "confidence": .4},
+        "date_role": {"choice": "contradicted", "confidence": .99},
+        "attribution": {"choice": "insufficient_evidence", "confidence": .8},
+    }
+    reason = review_reason(answers)
+    assert "Jev is uncertain about body side and location." in reason
+    assert "Jev suggests a source contradiction in encounter dates." in reason
+    assert "Jev could not establish source support for patient and provider attribution." in reason
+    assert len(review_flags(answers)) == 3
+
+
+def test_holdout_has_fixed_balanced_labels_and_all_dimensions():
+    from scripts.jev_acceptance_fixtures import FIXTURES, EXPECTED_DIMENSIONS
+    assert len(FIXTURES) == 12
+    assert sum(f[3] == "supported" for f in FIXTURES) == 6
+    assert len({f[0] for f in FIXTURES}) == 12
+    for identifier, source, claim, expected in FIXTURES:
+        assert source.startswith("SYNTHETIC RECORD")
+        assert set(EXPECTED_DIMENSIONS[identifier]) == set(questions())
+        assert EXPECTED_DIMENSIONS[identifier]["factual_support"] == expected
+
+
+def test_holdout_exit_fails_when_correct_labels_still_overflag(tmp_path, monkeypatch):
+    from scripts import jev_benchmark as benchmark
+    from scripts.jev_acceptance_fixtures import FIXTURES
+    expected = {claim: label for _, _, claim, label in FIXTURES}
+    class Client:
+        model = DEFAULT_MODEL
+        def evaluate(self, state, schema):
+            return response(expected[state["entry"]], confidence=.8)
+    monkeypatch.setattr(benchmark, "JevClient", Client)
+    monkeypatch.setattr("sys.argv", ["benchmark", "--live", "--suite", "holdout",
+                                    "--output", str(tmp_path / "results.json")])
+    assert benchmark.main() == 1
+    result = json.loads((tmp_path / "results.json").read_text())
+    assert result["correct"] == 12
+    assert not result["engineering_gate_passed"]

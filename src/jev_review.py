@@ -33,6 +33,20 @@ def review_flags(answers):
             or answer["confidence"] < REVIEW_THRESHOLD]
 
 
+def review_reason(answers):
+    """Describe uncertainty separately without suppressing any review flag."""
+    groups = {"contradicted": [], "insufficient_evidence": [], "uncertain": []}
+    for key in review_flags(answers):
+        choice = answers[key]["choice"]
+        groups[choice if choice in groups else "uncertain"].append(CHECK_LABELS[key])
+    labels = {"contradicted": "Jev suggests a source contradiction in",
+              "insufficient_evidence": "Jev could not establish source support for",
+              "uncertain": "Jev is uncertain about"}
+    parts = [labels[group] + " " + ", ".join(checks) + "."
+             for group, checks in groups.items() if checks]
+    return " ".join(parts + ["Check the original source. The entry remains in the draft."])
+
+
 def source_loader(store, case_id):
     """Only use this case's recorded originals and exact extraction revisions."""
     loaded = {}
@@ -199,7 +213,7 @@ def update_issues(store, case_id, report):
             items.append({"id": "jev-" + digest([result["entry_id"], doc])[:24],
                           "document_id": doc, "pages": sorted({r["page"] for r in result["source_refs"] if r["document_id"] == doc}),
                           "proposed_entry": {"text": result["text"]}, "entry_id": result["entry_id"],
-                          "reason": result.get("reason") or "Review Jev flags: " + ", ".join(CHECK_LABELS[k] for k in result["flags"]) + ". The entry remains in the draft.",
+                          "reason": result.get("reason") or review_reason(result["answers"]),
                           "fingerprint": digest(result)})
     if report.get("error") or (report["status"] == "incomplete" and not report["results"]):
         items.append({"id": "jev-unavailable", "reason": report.get("error", "No entries are available for Jev review."),

@@ -9,7 +9,7 @@ import httpx
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_MODEL = "jev-1.13.0"
-PROTOCOL = "chronology-jev-v2"
+PROTOCOL = "chronology-jev-v3"
 MAX_REQUEST_BYTES = 28000  # Conservative bound below the 32k per-question token limit.
 
 
@@ -103,7 +103,7 @@ class JevClient:
 
 
 CRITERIA = {
-    "supported": "Every assertion the entry actually makes within this scope agrees with the supplied source. Do not demand details the entry never asserts.",
+    "supported": "The entry makes at least one assertion within this scope, and all such assertions agree with the supplied source. This option requires an actual in-scope assertion; if there is none, choose not_applicable when offered. Do not demand details the entry never asserts.",
     "contradicted": "The source explicitly establishes an incompatible fact within this scope. Silence or absent documentation is NOT a contradiction.",
     "insufficient_evidence": "The entry actually makes an assertion within this scope that the source does not establish, and the source does not explicitly establish its opposite.",
 }

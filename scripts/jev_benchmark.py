@@ -53,20 +53,24 @@ def main():
     parser.add_argument("--live", action="store_true", help="Send only the built-in fictional examples to TypeSafe.")
     parser.add_argument("--env-file", type=Path, help="Private local environment file containing TYPESAFE_API_KEY.")
     parser.add_argument("--output", type=Path, default=Path("/tmp/jev-synthetic-benchmark.json"))
+    parser.add_argument("--suite", choices=("development", "holdout"), default="development")
     args = parser.parse_args()
-    if len({f[0] for f in FIXTURES}) != len(FIXTURES):
+    fixtures = FIXTURES
+    if args.suite == "holdout":
+        from scripts.jev_acceptance_fixtures import FIXTURES as fixtures, EXPECTED_DIMENSIONS
+    if len({f[0] for f in fixtures}) != len(fixtures):
         raise ValueError("Duplicate fixture IDs")
     if not args.live:
-        print(f"Validated {len(FIXTURES)} fictional fixtures. No API calls made. Use --live to evaluate the API.")
+        print(f"Validated {len(fixtures)} fictional fixtures. No API calls made. Use --live to evaluate the API.")
         return 0
     if args.env_file:
         from dotenv import load_dotenv
         load_dotenv(args.env_file, override=False)
-    result = {"synthetic_only": True, "clinical_validation": False, "protocol": PROTOCOL, "threshold": REVIEW_THRESHOLD, "results": []}
+    result = {"synthetic_only": True, "clinical_validation": False, "suite": args.suite, "protocol": PROTOCOL, "threshold": REVIEW_THRESHOLD, "results": []}
     try:
         client = JevClient()
         result["model"] = client.model
-        for identifier, source, claim, expected in FIXTURES:
+        for identifier, source, claim, expected in fixtures:
             data = client.evaluate({"entry": claim, "source_pages": [
                 {"document_id": "fictional", "page": 1, "text": "SYNTHETIC RECORD\n" + source}]}, questions())
             observed = data["answers"]["factual_support"]["choice"]
@@ -74,9 +78,18 @@ def main():
                                       "correct": expected == observed, "response": data})
             atomic_json(args.output, result)
         result.update(summarize(result["results"]))
+        if args.suite == "holdout":
+            result["expected_dimensions"] = EXPECTED_DIMENSIONS
+            result["dimension_correct"] = sum(
+                r["response"]["answers"][key]["choice"] == expected
+                for r in result["results"] for key, expected in EXPECTED_DIMENSIONS[r["id"]].items())
+            result["dimension_total"] = len(fixtures) * 6
+            result["engineering_gate_passed"] = (
+                result["unsupported_entries_without_flags"] == 0
+                and result["supported_entries_flagged"] <= 1)
         atomic_json(args.output, result)
         print(f"Synthetic results: {result['correct']}/{result['total']} expected labels; {result['false_accepts']} overall-label false accepts; {result['supported_entries_flagged']}/{result['supported_entries']} supported entries flagged. Not clinical validation.")
-        return 0 if result["correct"] == result["total"] else 1
+        return 0 if result["correct"] == result["total"] and result.get("engineering_gate_passed", True) else 1
     except JevError as exc:
         result["error"] = str(exc)
         atomic_json(args.output, result)

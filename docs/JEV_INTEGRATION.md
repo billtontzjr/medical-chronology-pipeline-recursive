@@ -35,11 +35,32 @@ The saved local key authenticated successfully against the pinned model. Product
 | Baseline v1 | 16/18 | 0/13 | 5/5 | 18/18 |
 | Revised v2 | 17/18 | 0/13 | 5/5 | 18/18 |
 
-The fixtures contain **five** supported claims and thirteen unsupported claims. Earlier conversational reporting counted six supported claims incorrectly; the saved fixtures and these counts are authoritative. Raw sanitized responses are preserved in [baseline-v1.json](jev-evaluation/baseline-v1.json) and [revised-v2.json](jev-evaluation/revised-v2.json). Baseline prompts are in commit `ab74eff87f494b306612dd04a4e63cb7f0a25a7a`; the current adapter contains v2 prompts. The v2 revision separates dimension scope and distinguishes absent evidence from contradiction. It fixes the medication-label mismatch. The signature-date claim still receives insufficient evidence instead of contradiction.
+The fixtures contain **five** supported claims and thirteen unsupported claims. Earlier conversational reporting counted six supported claims incorrectly; the saved fixtures and these counts are authoritative. Raw sanitized responses are preserved in [baseline-v1.json](jev-evaluation/baseline-v1.json) and [revised-v2.json](jev-evaluation/revised-v2.json). Baseline prompts are in commit `ab74eff87f494b306612dd04a4e63cb7f0a25a7a`; v2 prompts are retained in commit `a3e12af0f339b909f13ee2033d2afb1a2f020f1a`. The v2 revision separates dimension scope and distinguishes absent evidence from contradiction. It fixes the medication-label mismatch. The signature-date claim still receives insufficient evidence instead of contradiction.
 
 **This pilot fails the review-workload acceptance check:** every correct entry still receives a flag, mostly because at least one dimension falls below the unchanged 0.90 threshold. Zero false accepts on thirteen examples does not establish reliable error detection; flagging everything is not useful discrimination. Prompts were revised against the same fixtures, so v2 is a development result, not held-out validation. All six returned decisions are retained, but only the overall label has a manually specified label for each fixture. The benchmark now reports actual production routing alongside label accuracy using the shared routing rule.
 
 Keep the feature disabled for team use. Before activation, evaluate a separately labeled set of realistic, longer fictional records with per-dimension labels, establish acceptable missed-error and false-flag limits, and validate any prompt or threshold change on held-out examples. Test a synthetic case through the deployed workspace and confirm provider data arrangements before patient use. No live deployed-workspace or patient-data acceptance was completed here. Local mocked end-to-end tests cover export reports, visible issues, caching and unchanged prior versions.
+
+## Follow-up evaluation and local workflow
+
+V3 makes the supported/not-applicable choices mutually exclusive: supported requires an actual assertion in the dimension. The unchanged 0.90 routing rule still flags 5/5 correct development examples; overall labels remain 17/18. This clarification does not by itself solve the workload problem. The [v3 questions](jev-evaluation/questions-v3.json) and [development responses](jev-evaluation/clarified-v3.json) are retained.
+
+Before making holdout API calls, six longer fictional records with paired correct/incorrect claims were authored in `scripts/jev_acceptance_fixtures.py`. Labels for all six dimensions and an engineering gate were specified in that file first: zero unsupported claims escaping review and no more than one of six correct entries flagged. These labels were authored by the coding assistant from the supplied text, not by independent clinicians. They were not derived from Jev responses. The prompts and threshold were not tuned after seeing these results.
+
+[Holdout results](jev-evaluation/holdout-v3.json): **12/12 overall labels**, **67/72 dimension labels**, **0/6 unsupported claims escaping review**, and **4/6 correct entries flagged**. The engineering gate failed. Two correct entries received no flags; that is not medical clearance. The benchmark exits with a failure code when the workload gate fails even if every overall label matches. This small set is independent of prompt tuning, but is not independent clinical validation or a statistically reliable sensitivity estimate.
+
+The [local workspace smoke result](jev-evaluation/workspace-v3.json) used a newly generated fictional PDF, actual PDF text extraction and a real Jev call. It verified case details, visible review-issue data, source PDF/text/PNG preview routes, authenticated downloads, rejection of unauthenticated access, unchanged narratives and historical exports, and a repeat export without a second Jev call. Generation and cloud upload used deterministic fixtures; neither Claude nor Dropbox was called. This was a local route-level test, not a rendered browser or deployed Render test. A subsequent offline replay verified the final review-message wording and a nonempty cache.
+
+```sh
+python scripts/jev_benchmark.py --live --suite holdout --env-file .env.local --output /tmp/jev-holdout.json
+python scripts/jev_workspace_smoke.py --live --env-file .env.local --output /tmp/jev-workspace.json
+```
+
+The smoke script requires development dependencies and Poppler tools. It always creates an isolated temporary fictional workspace and removes it on exit. Its environment changes affect only its process; it never enables the real service or modifies `.env.local`. Re-running live evaluations incurs fresh requests.
+
+Review messages now distinguish a suggested source contradiction, missing source support, and model uncertainty. All three still require review under the same rule. No findings are suppressed, and a low-confidence response is not presented as proof of an error. TypeSafe documents confidence as a statistic derived from its option distribution, not a clinical accuracy probability: [confidence reference](https://docs.typesafe.ai/confidence).
+
+**Decision: retain draft PR and keep production disabled.** The integration works locally, but the promised workload gate has not passed. Next evaluation should compare a separate simpler question design on development data, then use a fresh holdout; do not keep tuning on this now-observed set. A rendered browser test and isolated Render acceptance remain required before activation. The 523-test regression suite passes with four existing manual/credential-dependent skips.
 
 ## Review behavior and evidence
 

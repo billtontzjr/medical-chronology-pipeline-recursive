@@ -1,0 +1,162 @@
+{
+  "synthetic_only": true,
+  "real_jev": true,
+  "real_pdf_text_extraction": true,
+  "fixture_generation": true,
+  "fixture_cloud_upload": true,
+  "deployed": false,
+  "browser_visual_test": false,
+  "entries_checked": 1,
+  "review_flags": [
+    "factual_support",
+    "attribution"
+  ],
+  "downloads_verified": [
+    "chronology.docx",
+    "chronology.json",
+    "chronology.md",
+    "companion_coverage.json",
+    "excluded_documents.json",
+    "gaps.md",
+    "jev_review.json",
+    "jev_review.md",
+    "manifest.json",
+    "manual_review.docx",
+    "manual_review.json",
+    "manual_review.md",
+    "ocr_coverage.json",
+    "summary.md",
+    "verification.md",
+    "chronology.docx",
+    "chronology.json",
+    "chronology.md",
+    "companion_coverage.json",
+    "excluded_documents.json",
+    "gaps.md",
+    "jev_review.json",
+    "jev_review.md",
+    "manifest.json",
+    "manual_review.docx",
+    "manual_review.json",
+    "manual_review.md",
+    "ocr_coverage.json",
+    "summary.md",
+    "verification.md"
+  ],
+  "prior_versions_unchanged": true,
+  "narrative_unchanged": true,
+  "cached_repeat_without_api": true,
+  "unauthenticated_access_rejected": true,
+  "source_pdf_text_and_preview_verified": true,
+  "report": {
+    "protocol": "chronology-jev-v3",
+    "notice": "Jev is an additional automated review of final entries against cited source pages. It does not certify medical accuracy, correct OCR, check every uncited page, establish missing-encounter coverage, or replace human review. Flagged entries remain in the draft. Confidence is a model statistic, not a guarantee of correctness.",
+    "threshold": 0.9,
+    "entries_total": 1,
+    "entries_checked": 1,
+    "entries_unchecked": 0,
+    "results": [
+      {
+        "entry_id": "825a2e3edca25337afaed90e841a",
+        "document_id": "c8864eca820cc7ba52859cc9",
+        "text": "02/05/2026. Avery Example, MD. Example Clinic. Office evaluation. History: Neck pain without arm weakness. Examination: Upper extremity strength 5/5. Impression: Cervical strain. Plan: Physical therapy and follow-up in four weeks.",
+        "status": "review_required",
+        "source_refs": [
+          {
+            "document_id": "c8864eca820cc7ba52859cc9",
+            "page": 1,
+            "source_sha256": "eeb8d7e5071930fe81292d7e237aacddd47c8e8d78982aaff280440b5f09eb3d",
+            "revision": "83594ebd5a2be86ab293f84a1d19c7ce82832338114bdf7eaf97238989904f67",
+            "page_sha256": "565acf9c8fa8dac04a9771c9bc27d1ff77b7956b5fe941714e828446f1c89a52"
+          },
+          {
+            "document_id": "c8864eca820cc7ba52859cc9",
+            "page": 1,
+            "source_sha256": "eeb8d7e5071930fe81292d7e237aacddd47c8e8d78982aaff280440b5f09eb3d",
+            "revision": "83594ebd5a2be86ab293f84a1d19c7ce82832338114bdf7eaf97238989904f67",
+            "page_sha256": "565acf9c8fa8dac04a9771c9bc27d1ff77b7956b5fe941714e828446f1c89a52"
+          }
+        ],
+        "signature": "c76f6a83f517f2299ec858dd24de3fbca66a637bc306e2b968d15bc4474a9758",
+        "answers": {
+          "factual_support": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.72,
+            "probabilities": {
+              "insufficient_evidence": 0.08,
+              "contradicted": 0.1,
+              "supported": 0.81
+            }
+          },
+          "date_role": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.99,
+            "probabilities": {
+              "insufficient_evidence": 0.0,
+              "contradicted": 0.0,
+              "supported": 1.0,
+              "not_applicable": 0.0
+            }
+          },
+          "attribution": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.53,
+            "probabilities": {
+              "insufficient_evidence": 0.07,
+              "contradicted": 0.18,
+              "supported": 0.65,
+              "not_applicable": 0.1
+            }
+          },
+          "negation": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.95,
+            "probabilities": {
+              "insufficient_evidence": 0.02,
+              "contradicted": 0.0,
+              "supported": 0.96,
+              "not_applicable": 0.02
+            }
+          },
+          "anatomy": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.96,
+            "probabilities": {
+              "insufficient_evidence": 0.0,
+              "contradicted": 0.0,
+              "supported": 0.98,
+              "not_applicable": 0.02
+            }
+          },
+          "procedure_status": {
+            "type": "choice",
+            "choice": "supported",
+            "confidence": 0.96,
+            "probabilities": {
+              "insufficient_evidence": 0.02,
+              "contradicted": 0.0,
+              "supported": 0.97,
+              "not_applicable": 0.01
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 2514,
+          "output_tokens": 326
+        },
+        "flags": [
+          "factual_support",
+          "attribution"
+        ]
+      }
+    ],
+    "model": "jev-1.13.0",
+    "status": "human_review_required"
+  },
+  "evaluation_date": "2026-09-19"
+}
