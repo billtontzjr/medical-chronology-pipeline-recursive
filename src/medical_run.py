@@ -706,6 +706,11 @@ class MedicalRun:
                         if r.get("proposed_entry")
                         else {}
                     ),
+                    **(
+                        {"rejected_candidate": r["rejected_candidate"]}
+                        if r.get("rejected_candidate")
+                        else {}
+                    ),
                 )
                 for r in result["reviews"]
             ]

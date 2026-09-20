@@ -128,7 +128,7 @@ def validate_diagnostic_structure(entry, documents):
         reject('each cited source must have result evidence.')
 
 
-def render_diagnostic(entry, documents):
+def render_diagnostic(entry, documents, *, provenance=None):
     """Require a complete same-page date/study/result anchor before publication."""
     validate_diagnostic_structure(entry, documents)
 
@@ -141,7 +141,7 @@ def render_diagnostic(entry, documents):
         date = datetime.strptime(result['date'], '%m/%d/%Y').strftime('%m/%d/%Y')
     except ValueError:
         reject('the service date is invalid.', 'invalid_service_date')
-    ids, quotes = set(), []
+    ids, quotes, verified = set(), [], []
     for item in result['evidence']:
         sid, date_quote, quote = item['source_id'], item['date_quote'], item['quote']
         if date_value(date_quote) is None:
@@ -158,7 +158,7 @@ def render_diagnostic(entry, documents):
         content = document.get('content', '')
         attribution = content + '\n' + document.get('reference_context', '')
         supported, failures = [], set()
-        for _, unit in page_units(content):
+        for page, unit in page_units(content):
             normalized = _normalize(unit)
             header = _report_header(unit, content, result['study'], date_quote, date)
             checks = {
@@ -174,6 +174,14 @@ def render_diagnostic(entry, documents):
                 failures.update(check for check, valid in checks.items() if not valid)
                 continue
             supported.append(unit)
+            verified.append({
+                'source_id': sid,
+                'page': page,
+                'date_quote': date_quote,
+                'result_quote': quote,
+                'header_pages': [number for number, text in page_units(content)
+                                 if header and text == header],
+            })
         if not supported:
             reject('the date, study and exact result quote do not align on a source page.',
                    checks=sorted(failures))
@@ -189,4 +197,9 @@ def render_diagnostic(entry, documents):
     if 'text' in entry and (not isinstance(entry['text'], str)
                             or _normalize(entry['text']) != _normalize(text)):
         reject('free-form diagnostic narrative differs from the source-backed rendering.')
+    # Publish provenance only after the entire result passes. These quotations
+    # passed the existing source checks; page numbers come only from markers.
+    # Unknown page mapping remains None, never an invented physical page.
+    if provenance is not None:
+        provenance.extend(verified)
     return text
